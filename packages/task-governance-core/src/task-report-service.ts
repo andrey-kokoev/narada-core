@@ -117,17 +117,22 @@ function findTaskEvidenceBlockers(markdown: string): string[] {
 }
 
 function loadSqlActiveAssignment(cwd: string, taskId: string, providedStore?: TaskLifecycleStore) {
+  const selectReportingAnchor = (store: TaskLifecycleStore) => {
+    const active = store.getAssignments(taskId).filter((assignment) => assignment.released_at === null);
+    return active.find((assignment) => assignment.intent === 'primary' || assignment.intent === 'takeover')
+      ?? active[0]
+      ?? null;
+  };
   if (providedStore) {
-    return providedStore.getActiveAssignment(taskId) ?? null;
+    return selectReportingAnchor(providedStore);
   }
   const store = openTaskLifecycleStore(cwd);
   try {
-    return store.getActiveAssignment(taskId) ?? null;
+    return selectReportingAnchor(store);
   } finally {
     store.db.close();
   }
 }
-
 function loadSqlTaskStatus(cwd: string, taskId: string, taskNumber: string, providedStore?: TaskLifecycleStore): string | undefined {
   if (providedStore) {
     return providedStore.getLifecycle(taskId)?.status
@@ -141,7 +146,6 @@ function loadSqlTaskStatus(cwd: string, taskId: string, taskNumber: string, prov
     store.db.close();
   }
 }
-
 function persistReportInStore(store: TaskLifecycleStore, report: WorkResultReport): void {
   store.upsertReportRecord({
     report_id: report.report_id,

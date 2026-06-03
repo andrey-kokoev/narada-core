@@ -2236,8 +2236,8 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       packet.dispatch_status,
       packet.sequence,
       packet.created_by,
-      packet.target_session_id,
-      packet.target_session_title,
+      packet.target_session_id ?? null,
+      packet.target_session_title ?? null,
     );
   }
 

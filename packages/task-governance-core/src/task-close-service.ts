@@ -146,6 +146,18 @@ export async function closeTaskService(
     gateFailures.push('Task lacks an Evidence Admission result; run `narada task evidence admit <task-number> --by <id>` first');
   } else if (admission.verdict !== 'admitted') {
     gateFailures.push(`Latest Evidence Admission result is ${admission.verdict}`);
+    try {
+      const blockers = JSON.parse(admission.blockers_json) as unknown;
+      if (Array.isArray(blockers)) {
+        for (const blocker of blockers) {
+          if (typeof blocker === 'string' && !gateFailures.includes(blocker)) {
+            gateFailures.push(blocker);
+          }
+        }
+      }
+    } catch {
+      // Ignore malformed admission blocker projections.
+    }
   } else if (admission.lifecycle_eligible_status !== 'closed') {
     gateFailures.push('Latest Evidence Admission result is not eligible for lifecycle close');
   }
