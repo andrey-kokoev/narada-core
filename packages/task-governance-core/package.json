@@ -1,0 +1,48 @@
+{
+  "name": "@narada2/task-governance-core",
+  "version": "0.1.0",
+  "description": "Neutral task governance domain core shared by Narada runtimes and MCP surfaces.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./assignment-intent": { "types": "./dist/assignment-intent.d.ts", "import": "./dist/assignment-intent.js" },
+    "./evidence-admission": { "types": "./dist/evidence-admission.d.ts", "import": "./dist/evidence-admission.js" },
+    "./task-governance": { "types": "./dist/task-governance.d.ts", "import": "./dist/task-governance.js" },
+    "./task-close-service": { "types": "./dist/task-close-service.d.ts", "import": "./dist/task-close-service.js" },
+    "./task-report-service": { "types": "./dist/task-report-service.d.ts", "import": "./dist/task-report-service.js" },
+    "./task-review-service": { "types": "./dist/task-review-service.d.ts", "import": "./dist/task-review-service.js" },
+    "./task-review-authority": { "types": "./dist/task-review-authority.d.ts", "import": "./dist/task-review-authority.js" },
+    "./task-finish-service": { "types": "./dist/task-finish-service.d.ts", "import": "./dist/task-finish-service.js" },
+    "./task-allocate-service": { "types": "./dist/task-allocate-service.d.ts", "import": "./dist/task-allocate-service.js" },
+    "./task-assignment-lifecycle-service": { "types": "./dist/task-assignment-lifecycle-service.d.ts", "import": "./dist/task-assignment-lifecycle-service.js" },
+    "./task-search-service": { "types": "./dist/task-search-service.d.ts", "import": "./dist/task-search-service.js" },
+    "./task-graph": { "types": "./dist/task-graph.d.ts", "import": "./dist/task-graph.js" },
+    "./task-lifecycle-store": { "types": "./dist/task-lifecycle-store.d.ts", "import": "./dist/task-lifecycle-store.js" },
+    "./task-lifecycle-mcp-contract": { "types": "./dist/task-lifecycle-mcp-contract.d.ts", "import": "./dist/task-lifecycle-mcp-contract.js" },
+    "./directive-runtime-store": { "types": "./dist/directive-runtime-store.d.ts", "import": "./dist/directive-runtime-store.js" },
+    "./task-projection": { "types": "./dist/task-projection.d.ts", "import": "./dist/task-projection.js" },
+    "./task-recommender": { "types": "./dist/task-recommender.d.ts", "import": "./dist/task-recommender.js" },
+    "./task-spec": { "types": "./dist/task-spec.d.ts", "import": "./dist/task-spec.js" },
+    "./mutation-evidence": { "types": "./dist/mutation-evidence.d.ts", "import": "./dist/mutation-evidence.js" },
+    "./sqlite-runtime": { "types": "./dist/sqlite-runtime.d.ts", "import": "./dist/sqlite-runtime.js" },
+    "./sqlite-database": { "types": "./dist/sqlite-database.d.ts", "import": "./dist/sqlite-database.js" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run test/lib --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000 && node test/import-boundary.test.mjs",
+    "test:smoke": "vitest run test/lib/task-lifecycle-store.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:fast": "vitest run test/lib/task-lifecycle-store.test.ts test/lib/task-projection.test.ts test/lib/evidence-admission.test.ts test/lib/task-recommender.test.ts test/lib/task-close-service.test.ts test/lib/task-allocate-service.test.ts test/lib/task-search-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:assignment-lifecycle": "vitest run test/lib/task-assignment-lifecycle-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:governance": "vitest run test/lib/task-governance.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3",
+    "vitest": "^1.0.0"
+  },
+  "engines": { "node": ">=22.0.0" }
+}
