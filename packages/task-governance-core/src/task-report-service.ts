@@ -96,6 +96,42 @@ function sectionBody(markdown: string, heading: string): string | null {
   return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
 }
 
+function replaceSectionBody(markdown: string, heading: string, replacement: string): string {
+  const headingPattern = new RegExp(`^##\\s+${heading}\\s*$`, 'gim');
+  const match = headingPattern.exec(markdown);
+  if (!match) return markdown;
+  const start = match.index + match[0].length;
+  const rest = markdown.slice(start);
+  const nextHeading = rest.search(/^##\s+/m);
+  const end = nextHeading === -1 ? markdown.length : start + nextHeading;
+  return `${markdown.slice(0, start)}\n\n${replacement.trim()}\n${markdown.slice(end)}`;
+}
+
+function materializeReportEvidenceInProjection(markdown: string, options: {
+  summary: string;
+  changedFiles: string[];
+  verification: Array<{ command: string; result: string }>;
+}): string {
+  let next = markdown;
+  const executionNotes = sectionBody(next, 'Execution Notes');
+  if (executionNotes?.includes('<!-- Record what was done, decisions made, and files changed. -->')) {
+    const changedFiles = options.changedFiles.length > 0
+      ? `Changed files:\n${options.changedFiles.map((file) => `- ${file}`).join('\n')}`
+      : null;
+    next = replaceSectionBody(next, 'Execution Notes', [options.summary, changedFiles].filter((entry): entry is string => Boolean(entry)).join('\n\n'));
+  }
+
+  const verification = sectionBody(next, 'Verification');
+  if (verification?.includes('<!-- Record commands run, results observed, and how correctness was checked. -->') && options.verification.length > 0) {
+    next = replaceSectionBody(
+      next,
+      'Verification',
+      options.verification.map((entry) => `- ${entry.command}: ${entry.result}`).join('\n'),
+    );
+  }
+  return next;
+}
+
 function findTaskEvidenceBlockers(markdown: string): string[] {
   const blockers: string[] = [];
   const acceptanceCriteria = sectionBody(markdown, 'Acceptance Criteria');
@@ -366,7 +402,7 @@ function resolveMandatoryReviewTarget(args: {
               `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
               `narada task roster add <distinct-reviewer> --role reviewer --capability review`,
             ],
-            no_workaround: 'Do not create an unrouted review request or self-review the report.',
+            no_workaround: 'Do not create an unrouted directed review obligation or self-review the report. If no reviewer can be resolved, leave implementation complete in pending review until routing is admitted.',
           },
         },
       };
@@ -408,7 +444,7 @@ function resolveMandatoryReviewTarget(args: {
               `narada task roster add <distinct-reviewer> --role ${defaultRole} --capability review`,
               `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
             ],
-            no_workaround: 'Do not create an unrouted review request or self-review the report.',
+            no_workaround: 'Do not create an unrouted directed review obligation or self-review the report. If no reviewer can be resolved, leave implementation complete in pending review until routing is admitted.',
           },
         },
       };
@@ -442,14 +478,14 @@ function resolveMandatoryReviewTarget(args: {
       status: 'error',
       error: distinctReviewers.length > 1
         ? `Review routing is ambiguous: multiple distinct reviewer-role agents exist (${distinctReviewers.map((entry) => entry.agent_id).join(', ')}); pass --reviewer.`
-        : 'Review routing failed: no distinct admitted reviewer could be resolved. Unrouted review obligations are not admitted.',
+        : 'Review routing failed: no distinct admitted reviewer could be resolved. Unrouted directed review obligations are not admitted; leave the implementation in pending review until routing is admitted.',
       review_authority_repair: {
         reason: 'missing_reviewer_identity',
         commands: [
           `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
           'narada task roster add <distinct-reviewer> --role reviewer --capability review',
         ],
-        no_workaround: 'Do not create an unrouted review request; report-time review routing must resolve to a distinct admitted reviewer.',
+        no_workaround: 'Do not create an unrouted directed review obligation; report-time review routing must resolve to a distinct admitted reviewer, or the implementation must remain pending review until routing is admitted.',
       },
     },
   };
@@ -614,10 +650,23 @@ export async function reportTaskService(
   const verification = parsedVerificationResult && 'ok' in parsedVerificationResult
     ? parsedVerificationResult.value
     : [];
-
-  const evidenceBlockers = findTaskEvidenceBlockers(body);
+  let evidenceBlockers = findTaskEvidenceBlockers(body);
+  if (!evidenceBlockers.some((blocker) => blocker.startsWith('Acceptance Criteria '))) {
+    body = materializeReportEvidenceInProjection(body, { summary, changedFiles, verification });
+    evidenceBlockers = findTaskEvidenceBlockers(body);
+  }
   const hasEvidenceBlockers = evidenceBlockers.length > 0;
-  const nextStatus = hasEvidenceBlockers ? 'needs_continuation' : 'in_review';
+  if (hasEvidenceBlockers) {
+    return {
+      exitCode: ExitCode.GENERAL_ERROR,
+      result: {
+        status: 'error',
+        error: 'Task evidence is incomplete; update task evidence before reporting.',
+        evidence_blockers: evidenceBlockers,
+      },
+    };
+  }
+  const nextStatus = 'in_review';
   if (!isValidTransition(taskStatus, nextStatus)) {
     return {
       exitCode: ExitCode.GENERAL_ERROR,
