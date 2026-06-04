@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { claimTaskService, releaseTaskService } from '../../src/task-assignment-lifecycle-service.js';
+import { claimTaskService } from '../../src/task-assignment-lifecycle-service.js';
 import { reportTaskService } from '../../src/task-report-service.js';
 import { reviewTaskService } from '../../src/task-review-service.js';
 import { openTaskLifecycleStore } from '../../src/task-lifecycle-store.js';
@@ -69,8 +69,30 @@ function setupRepo(tempDir: string): void {
 }
 
 async function moveToReview(tempDir: string, taskNumber = '999'): Promise<void> {
-  await claimTaskService({ taskNumber, agent: 'worker', cwd: tempDir });
-  await releaseTaskService({ taskNumber, reason: 'completed', cwd: tempDir });
+  const taskId = taskNumber === '998'
+    ? '20260420-998-no-verification'
+    : '20260420-999-test-task';
+  const taskPath = join(tempDir, '.ai', 'do-not-open', 'tasks', `${taskId}.md`);
+  const taskContent = readFileSync(taskPath, 'utf8').replace(/^status: .+$/m, 'status: in_review');
+  writeFileSync(taskPath, taskContent);
+
+  const store = openTaskLifecycleStore(tempDir);
+  try {
+    store.upsertLifecycle({
+      task_id: taskId,
+      task_number: Number(taskNumber),
+      status: 'in_review',
+      governed_by: null,
+      closed_at: null,
+      closed_by: null,
+      reopened_at: null,
+      reopened_by: null,
+      continuation_packet_json: null,
+      updated_at: new Date().toISOString(),
+    });
+  } finally {
+    store.db.close();
+  }
 }
 
 describe('task review service', () => {
@@ -236,7 +258,20 @@ describe('task review service', () => {
       summary: 'Done',
       cwd: tempDir,
     });
+    expect(report.exitCode).toBe(ExitCode.SUCCESS);
+    expect(report.result).toMatchObject({
+      new_status: 'closed',
+      ready_for_review: false,
+      obligation_id: null,
+    });
     const reportId = report.result.report_id!;
+    const reportStore = openTaskLifecycleStore(tempDir);
+    try {
+      expect(reportStore.listDirectedObligationsForTask('20260420-999-test-task')).toHaveLength(0);
+    } finally {
+      reportStore.db.close();
+    }
+    await moveToReview(tempDir);
 
     const result = await reviewTaskService({
       taskNumber: '999',
@@ -262,8 +297,7 @@ describe('task review service', () => {
       join(tempDir, '.ai', 'do-not-open', 'tasks', '20260420-998-no-verification.md'),
       '---\ntask_id: 998\nstatus: opened\n---\n\n# Task 998\n\n## Acceptance Criteria\n\n- [x] Done\n\n## Execution Notes\nDone.\n',
     );
-    await claimTaskService({ taskNumber: '998', agent: 'worker', cwd: tempDir });
-    await releaseTaskService({ taskNumber: '998', reason: 'completed', cwd: tempDir });
+    await moveToReview(tempDir, '998');
 
     const result = await reviewTaskService({
       taskNumber: '998',

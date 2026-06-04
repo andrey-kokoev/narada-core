@@ -1611,7 +1611,7 @@ export type TaskStatus = typeof TASK_STATUSES[number];
 const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   draft: ['opened'],
   opened: ['claimed', 'closed', 'deferred'],
-  claimed: ['in_review', 'opened', 'needs_continuation', 'deferred'],
+  claimed: ['closed', 'opened', 'needs_continuation', 'deferred'],
   needs_continuation: ['claimed', 'opened', 'deferred'],
   in_review: ['closed', 'opened', 'needs_continuation', 'deferred'],
   deferred: ['opened'],
