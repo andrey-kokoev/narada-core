@@ -874,6 +874,10 @@ function hasCurrentLifecycleSchema(db: Db): boolean {
     .prepare('pragma table_info(task_lifecycle)')
     .all() as Array<{ name?: string }>;
   if (!lifecycleColumns.some((column) => column.name === 'closure_mode')) return false;
+  const reportColumns = db
+    .prepare('pragma table_info(task_reports)')
+    .all() as Array<{ name?: string }>;
+  if (!reportColumns.some((column) => column.name === 'directive_id')) return false;
   const directedColumns = db
     .prepare('pragma table_info(directed_obligations)')
     .all() as Array<{ name?: string; notnull?: number }>;
@@ -883,6 +887,16 @@ function hasCurrentLifecycleSchema(db: Db): boolean {
     .prepare("select sql from sqlite_master where type = 'table' and name = 'directed_obligations'")
     .get() as { sql?: string } | undefined;
   return Boolean(directedSql?.sql?.includes('directed_obligations_no_role_ref_dup'));
+}
+
+function ensureTaskReportsDirectiveIdColumn(db: Db): void {
+  const reportColumns = db
+    .prepare('pragma table_info(task_reports)')
+    .all() as Array<{ name?: string }>;
+  if (!reportColumns.some((column) => column.name === 'directive_id')) {
+    db.exec('alter table task_reports add column directive_id text;');
+  }
+  db.exec('create index if not exists idx_task_reports_directive_id on task_reports(directive_id);');
 }
 
 export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
@@ -1402,13 +1416,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
     if (!lifecycleColumns.some((column) => column.name === 'priority_reason')) {
       this.db.exec('alter table task_lifecycle add column priority_reason text;');
     }
-    const reportColumns = this.db
-      .prepare('pragma table_info(task_reports)')
-      .all() as Array<{ name?: string }>;
-    if (!reportColumns.some((column) => column.name === 'directive_id')) {
-      this.db.exec('alter table task_reports add column directive_id text;');
-    }
-    this.db.exec('create index if not exists idx_task_reports_directive_id on task_reports(directive_id);');
+    ensureTaskReportsDirectiveIdColumn(this.db);
     ensureDirectedObligationTargetRefShape(this.db);
   }
 
@@ -2019,6 +2027,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   }
 
   insertReport(report: TaskReportRow): void {
+    ensureTaskReportsDirectiveIdColumn(this.db);
     const stmt = this.db.prepare(`
       insert into task_reports (
         report_id, task_id, agent_id, summary, changed_files_json, verification_json, directive_id, submitted_at

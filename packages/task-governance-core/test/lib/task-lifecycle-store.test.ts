@@ -593,6 +593,30 @@ describe('SqliteTaskLifecycleStore', () => {
       const reports = store.listReports('task-562');
       expect(reports[0]!.report_id).toBe('report-2');
     });
+
+    it('repairs legacy task_reports table before inserting directive-linked reports', () => {
+      db.exec(`
+        drop table task_reports;
+        create table task_reports (
+          report_id text primary key,
+          task_id text not null,
+          agent_id text not null,
+          summary text not null,
+          changed_files_json text,
+          verification_json text,
+          submitted_at text not null,
+          foreign key (task_id) references task_lifecycle(task_id)
+        );
+      `);
+
+      store.insertReport({ ...report, directive_id: 'dir_123' });
+
+      const columns = db
+        .prepare('pragma table_info(task_reports)')
+        .all() as Array<{ name?: string }>;
+      expect(columns.some((column) => column.name === 'directive_id')).toBe(true);
+      expect(store.listReports('task-562')[0]!.directive_id).toBe('dir_123');
+    });
   });
 
   describe('reviews', () => {
