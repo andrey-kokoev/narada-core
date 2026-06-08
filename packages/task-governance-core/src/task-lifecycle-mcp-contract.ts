@@ -311,7 +311,7 @@ function finishSchema(): JsonSchema {
     agent_id: stringSchema('Agent id finishing the task.'),
     summary: stringSchema('Finish summary.'),
     directive_id: stringSchema('Optional first-class directive id that caused this report. Prefer this structured field over summary tokens.'),
-    verdict: stringSchema('Review-state verdict only: accepted, accepted_with_notes, or rejected. Omit for claimed-state finish/report submission; claimed tasks should use summary plus changed_files or no_files_changed. Invalid values are reported by the finish handler.'),
+    verdict: enumStringSchema(['accepted', 'accepted_with_notes', 'rejected'], 'Review-state verdict only: accepted, accepted_with_notes, or rejected. Omit for claimed-state finish/report submission; claimed tasks should use summary plus changed_files or no_files_changed.'),
     reviewer: stringSchema('Optional admitted reviewer agent id or unique reviewer role alias for the generated review obligation.'),
     changed_files: arraySchema(stringSchema('Repo-relative changed file path.'), 'Explicit changed-file evidence for this finish report.'),
     no_files_changed: booleanSchema('Explicitly declare that this finish legitimately changed no files.'),

@@ -54,6 +54,7 @@ describe('task lifecycle MCP contract', () => {
       expect(schema.changed_files).toBeTruthy();
       expect(schema.no_files_changed).toBeTruthy();
       expect(schema.verdict?.type).toBe('string');
+      expect(schema.verdict?.enum).toEqual(['accepted', 'accepted_with_notes', 'rejected']);
       expect(schema.verdict?.description).toMatch(/Review-state verdict only/);
       expect(schema.verdict?.description).toMatch(/Omit for claimed-state finish/);
       expect(schema.payload_ref?.description).toMatch(/top-level task_number and agent_id win/);
