@@ -265,7 +265,7 @@ describe('generateRecommendations warm-context affinity', () => {
       'completed',
     );
 
-    const result = await generateRecommendations({ cwd: tempDir });
+    const result = await generateRecommendations({ cwd: tempDir, now: '2026-04-20T00:00:00Z' });
 
     // Task 1000 is in Warm Chapter; agent-warm should be preferred
     const task1000Candidates = [result.primary, ...result.alternatives].filter(
@@ -289,7 +289,7 @@ describe('generateRecommendations warm-context affinity', () => {
       'completed',
     );
 
-    const result = await generateRecommendations({ cwd: tempDir });
+    const result = await generateRecommendations({ cwd: tempDir, now: '2026-04-20T00:00:00Z' });
 
     const task1000Candidates = [result.primary, ...result.alternatives].filter(
       (c) => c?.task_id === '20260420-1000-warm-ctx-task',
@@ -327,7 +327,7 @@ describe('generateRecommendations warm-context affinity', () => {
       { agent_id: 'agent-cold', role: 'implementer', capabilities: ['typescript', 'testing'], status: 'idle', task: null, first_seen_at: '2026-01-01T00:00:00Z', last_active_at: '2026-01-01T00:00:00Z' },
     ]);
 
-    const result = await generateRecommendations({ cwd: tempDir });
+    const result = await generateRecommendations({ cwd: tempDir, now: '2026-04-20T00:00:00Z' });
 
     // Task 1000 should still go to agent-cold because agent-warm is at capacity
     const task1000Candidates = [result.primary, ...result.alternatives].filter(

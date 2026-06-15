@@ -103,6 +103,8 @@ export interface RecommendationOptions {
   architectId?: string;
   /** SQLite-backed lifecycle store for authoritative status reads. */
   store?: TaskLifecycleStore;
+  /** ISO timestamp to use as the recommendation generation time. Defaults to now. */
+  now?: string;
 }
 
 export interface PrincipalSnapshot {
@@ -152,6 +154,11 @@ interface TaskInfo {
   dependsOn: number[] | undefined;
   continuationAffinity: ComputedAffinity;
   body: string;
+}
+
+function isChapterClosureProjection(fileName: string): boolean {
+  const taskId = fileName.replace(/\.md$/, '').toLowerCase();
+  return taskId.includes('chapter-closure');
 }
 
 // Warm-context record for advisory routing signals
@@ -446,14 +453,14 @@ export async function generateRecommendations(
 ): Promise<TaskRecommendation> {
   const cwd = resolve(options.cwd);
   const weights = DEFAULT_WEIGHTS;
-  const now = new Date().toISOString();
+  const now = options.now ?? new Date().toISOString();
   const store = options.store ?? openTaskLifecycleStore(cwd);
   const shouldCloseStore = options.store === undefined;
 
   // 1. Load task graph directly (need dependsOn which listRunnableTasks omits)
   const tasksDir = join(cwd, '.ai', 'do-not-open', 'tasks');
   const allMdFiles = (await readdir(tasksDir).catch(() => [] as string[])).filter((f) => f.endsWith('.md'));
-  const taskFiles = allMdFiles.filter(isExecutableTaskFile);
+  const taskFiles = allMdFiles.filter((file) => isExecutableTaskFile(file) && !isChapterClosureProjection(file));
   const ownership = await resolveExecutableTaskNumberOwnership(cwd, store);
 
   // Build chapter map for all tasks (needed for warm-context affinity)
@@ -719,6 +726,17 @@ export async function generateRecommendations(
           category: 'workload',
           severity: 'high',
           description: 'Principal has active work item',
+        });
+        continue;
+      }
+
+      // Roster-level busy block: agents marked working/reviewing/blocked are not available
+      const busyStatuses: Array<string | undefined> = ['working', 'reviewing', 'blocked'];
+      if (busyStatuses.includes(agent.status)) {
+        risks.push({
+          category: 'workload',
+          severity: 'high',
+          description: `Agent status is ${agent.status ?? 'unknown'}`,
         });
         continue;
       }
