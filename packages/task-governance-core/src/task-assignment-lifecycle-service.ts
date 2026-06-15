@@ -399,7 +399,7 @@ export async function continueTaskService(
 function releaseStatusForReason(reason: ReleaseReason): string {
   switch (reason) {
     case 'completed':
-      return 'closed';
+      return 'in_review';
     case 'budget_exhausted':
       return 'needs_continuation';
     case 'abandoned':

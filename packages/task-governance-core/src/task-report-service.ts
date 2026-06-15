@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import {
   createReportId,
   findReportByAssignmentId,
@@ -15,10 +16,26 @@ import {
 } from './task-governance.js';
 import { openTaskLifecycleStore, type TaskLifecycleStore } from './task-lifecycle-store.js';
 import { ExitCode } from './exit-codes.js';
+import { resolveReviewTargetFromRoster, resolveDefaultReviewerFromRoster, type ResolvedReviewTarget } from './task-review-authority.js';
+
+function readSiteConfigDefaultReviewerRole(cwd: string): string | undefined {
+  try {
+    const configPath = join(cwd, 'config.json');
+    const raw = readFileSync(configPath, 'utf8');
+    const config = JSON.parse(raw) as Record<string, unknown>;
+    const governance = config?.task_governance as Record<string, unknown> | undefined;
+    return typeof governance?.default_reviewer_role === 'string'
+      ? governance.default_reviewer_role
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface ReportTaskServiceOptions {
   taskNumber?: string;
   agent?: string;
+  reviewer?: string;
   summary?: string;
   directiveId?: string;
   changedFiles?: string;
@@ -41,6 +58,23 @@ export interface ReportTaskServiceResult {
   report_status?: WorkResultReport['report_status'];
   ready_for_review?: boolean;
   evidence_posture?: 'reported_with_incomplete_task_evidence';
+  review_target?: {
+    requested: string;
+    target_agent_id: string | null;
+    target_role: string | null;
+    resolution: 'agent_id' | 'role_alias';
+    review_authority: {
+      admitted: true;
+      authority_kind?: string;
+      rationale: string;
+      accepted_capabilities?: string[];
+    };
+  };
+  review_authority_repair?: {
+    reason: 'missing_reviewer_identity' | 'review_authority_not_admitted';
+    commands: string[];
+    no_workaround: string;
+  };
   error?: string;
   evidence_blockers?: string[];
   guidance?: never;
@@ -60,6 +94,42 @@ function sectionBody(markdown: string, heading: string): string | null {
   const rest = markdown.slice(start);
   const nextHeading = rest.search(/^##\s+/m);
   return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
+}
+
+function replaceSectionBody(markdown: string, heading: string, replacement: string): string {
+  const headingPattern = new RegExp(`^##\\s+${heading}\\s*$`, 'gim');
+  const match = headingPattern.exec(markdown);
+  if (!match) return markdown;
+  const start = match.index + match[0].length;
+  const rest = markdown.slice(start);
+  const nextHeading = rest.search(/^##\s+/m);
+  const end = nextHeading === -1 ? markdown.length : start + nextHeading;
+  return `${markdown.slice(0, start)}\n\n${replacement.trim()}\n${markdown.slice(end)}`;
+}
+
+function materializeReportEvidenceInProjection(markdown: string, options: {
+  summary: string;
+  changedFiles: string[];
+  verification: Array<{ command: string; result: string }>;
+}): string {
+  let next = markdown;
+  const executionNotes = sectionBody(next, 'Execution Notes');
+  if (executionNotes?.includes('<!-- Record what was done, decisions made, and files changed. -->')) {
+    const changedFiles = options.changedFiles.length > 0
+      ? `Changed files:\n${options.changedFiles.map((file) => `- ${file}`).join('\n')}`
+      : null;
+    next = replaceSectionBody(next, 'Execution Notes', [options.summary, changedFiles].filter((entry): entry is string => Boolean(entry)).join('\n\n'));
+  }
+
+  const verification = sectionBody(next, 'Verification');
+  if (verification?.includes('<!-- Record commands run, results observed, and how correctness was checked. -->') && options.verification.length > 0) {
+    next = replaceSectionBody(
+      next,
+      'Verification',
+      options.verification.map((entry) => `- ${entry.command}: ${entry.result}`).join('\n'),
+    );
+  }
+  return next;
 }
 
 function findTaskEvidenceBlockers(markdown: string): string[] {
@@ -266,6 +336,160 @@ function parseVerification(value: string | undefined): ReportTaskServiceResponse
   }
 }
 
+function safeIdPart(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
+}
+
+function reviewTargetIdPart(target: ResolvedReviewTarget): string {
+  return target.target_agent_id ?? (target.target_role ? `role_${target.target_role}` : 'unknown');
+}
+
+function reviewCommandAgentPlaceholder(target: ResolvedReviewTarget): string {
+  return target.target_agent_id ?? `<${target.target_role ?? 'reviewer'}-agent>`;
+}
+
+function hasDistinctRoleReviewer(args: {
+  roster: Awaited<ReturnType<typeof loadRoster>>;
+  reporterAgentId: string;
+  role: string | null;
+  taskNumber: string;
+}): boolean {
+  if (!args.role) return false;
+  return args.roster.agents.some((entry) =>
+    entry.agent_id !== args.reporterAgentId
+    && entry.role === args.role
+    && resolveReviewTargetFromRoster(args.roster, entry.agent_id, { taskNumber: args.taskNumber })?.ok === true
+  );
+}
+
+function resolveMandatoryReviewTarget(args: {
+  roster: Awaited<ReturnType<typeof loadRoster>>;
+  requested?: string;
+  reporterAgentId: string;
+  cwd: string;
+  taskNumber: string;
+}): ReportTaskServiceResponse | { ok: true; value: ResolvedReviewTarget } {
+  const explicit = resolveReviewTargetFromRoster(args.roster, args.requested, { taskNumber: args.taskNumber });
+  if (explicit && !explicit.ok) {
+    return {
+      exitCode: ExitCode.INVALID_CONFIG,
+      result: {
+        status: 'error',
+        error: explicit.error,
+        review_authority_repair: explicit.review_authority_repair,
+      },
+    };
+  }
+  if (explicit?.ok) {
+    const reporter = args.roster.agents.find((entry) => entry.agent_id === args.reporterAgentId);
+    const onlyTargetsReporterRole = explicit.target_agent_id === null
+      && explicit.target_role === reporter?.role
+      && !hasDistinctRoleReviewer({
+        roster: args.roster,
+        reporterAgentId: args.reporterAgentId,
+        role: explicit.target_role,
+        taskNumber: args.taskNumber,
+      });
+    if (explicit.target_agent_id === args.reporterAgentId || onlyTargetsReporterRole) {
+      return {
+        exitCode: ExitCode.GENERAL_ERROR,
+        result: {
+          status: 'error',
+          error: `Review target ${explicit.requested} resolves only to the reporting agent; self-review is not admitted.`,
+          review_authority_repair: {
+            reason: 'missing_reviewer_identity',
+            commands: [
+              `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
+              `narada task roster add <distinct-reviewer> --role reviewer --capability review`,
+            ],
+            no_workaround: 'Do not create an unrouted directed review obligation or self-review the report. If no reviewer can be resolved, leave implementation complete in pending review until routing is admitted.',
+          },
+        },
+      };
+    }
+    return { ok: true, value: explicit };
+  }
+
+  const defaultRole = readSiteConfigDefaultReviewerRole(args.cwd);
+  if (defaultRole) {
+    const resolved = resolveDefaultReviewerFromRoster(args.roster, defaultRole);
+    const reporter = args.roster.agents.find((entry) => entry.agent_id === args.reporterAgentId);
+    const roleHasDistinctReviewer = resolved.ok
+      ? hasDistinctRoleReviewer({
+          roster: args.roster,
+          reporterAgentId: args.reporterAgentId,
+          role: resolved.target_role,
+          taskNumber: args.taskNumber,
+        })
+      : false;
+    if (
+      resolved.ok
+      && (
+        resolved.target_agent_id !== args.reporterAgentId
+        || (resolved.target_agent_id === null && resolved.target_role !== reporter?.role)
+        || roleHasDistinctReviewer
+      )
+    ) {
+      return { ok: true, value: { ...resolved, requested: `default_routed:${defaultRole}` } };
+    }
+    if (resolved.ok) {
+      return {
+        exitCode: ExitCode.GENERAL_ERROR,
+        result: {
+          status: 'error',
+          error: `Configured default reviewer role '${defaultRole}' resolves to the reporting agent ${args.reporterAgentId}; self-review is not admitted.`,
+          review_authority_repair: {
+            reason: 'missing_reviewer_identity',
+            commands: [
+              `narada task roster add <distinct-reviewer> --role ${defaultRole} --capability review`,
+              `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
+            ],
+            no_workaround: 'Do not create an unrouted directed review obligation or self-review the report. If no reviewer can be resolved, leave implementation complete in pending review until routing is admitted.',
+          },
+        },
+      };
+    }
+  }
+
+  const distinctBuilders = args.roster.agents.filter((entry) =>
+    entry.agent_id !== args.reporterAgentId
+    && entry.role === 'builder'
+    && resolveReviewTargetFromRoster(args.roster, entry.agent_id, { taskNumber: args.taskNumber })?.ok === true
+  );
+  if (distinctBuilders.length > 0) {
+    const resolved = resolveReviewTargetFromRoster(args.roster, 'builder', { taskNumber: args.taskNumber });
+    if (resolved?.ok) return { ok: true, value: { ...resolved, requested: 'auto_routed:builder_role' } };
+  }
+
+  const distinctReviewers = args.roster.agents.filter((entry) =>
+    entry.agent_id !== args.reporterAgentId
+    && entry.agent_id !== 'operator'
+    && resolveReviewTargetFromRoster(args.roster, entry.agent_id, { taskNumber: args.taskNumber })?.ok === true
+    && entry.role === 'reviewer'
+  );
+  if (distinctReviewers.length > 0) {
+    const resolved = resolveReviewTargetFromRoster(args.roster, 'reviewer', { taskNumber: args.taskNumber });
+    if (resolved?.ok) return { ok: true, value: { ...resolved, requested: 'auto_routed:reviewer_role' } };
+  }
+
+  return {
+    exitCode: ExitCode.GENERAL_ERROR,
+    result: {
+      status: 'error',
+      error: distinctReviewers.length > 1
+        ? `Review routing is ambiguous: multiple distinct reviewer-role agents exist (${distinctReviewers.map((entry) => entry.agent_id).join(', ')}); pass --reviewer.`
+        : 'Review routing failed: no distinct admitted reviewer could be resolved. Unrouted directed review obligations are not admitted; leave the implementation in pending review until routing is admitted.',
+      review_authority_repair: {
+        reason: 'missing_reviewer_identity',
+        commands: [
+          `narada task report ${args.taskNumber} --agent ${args.reporterAgentId} --reviewer <distinct-reviewer> ...`,
+          'narada task roster add <distinct-reviewer> --role reviewer --capability review',
+        ],
+        no_workaround: 'Do not create an unrouted directed review obligation; report-time review routing must resolve to a distinct admitted reviewer, or the implementation must remain pending review until routing is admitted.',
+      },
+    },
+  };
+}
 
 export async function reportTaskService(
   options: ReportTaskServiceOptions,
@@ -426,10 +650,23 @@ export async function reportTaskService(
   const verification = parsedVerificationResult && 'ok' in parsedVerificationResult
     ? parsedVerificationResult.value
     : [];
-
-  const evidenceBlockers = findTaskEvidenceBlockers(body);
+  let evidenceBlockers = findTaskEvidenceBlockers(body);
+  if (!evidenceBlockers.some((blocker) => blocker.startsWith('Acceptance Criteria '))) {
+    body = materializeReportEvidenceInProjection(body, { summary, changedFiles, verification });
+    evidenceBlockers = findTaskEvidenceBlockers(body);
+  }
   const hasEvidenceBlockers = evidenceBlockers.length > 0;
-  const nextStatus = hasEvidenceBlockers ? 'needs_continuation' : 'closed';
+  if (hasEvidenceBlockers) {
+    return {
+      exitCode: ExitCode.GENERAL_ERROR,
+      result: {
+        status: 'error',
+        error: 'Task evidence is incomplete; update task evidence before reporting.',
+        evidence_blockers: evidenceBlockers,
+      },
+    };
+  }
+  const nextStatus = 'in_review';
   if (!isValidTransition(taskStatus, nextStatus)) {
     return {
       exitCode: ExitCode.GENERAL_ERROR,
@@ -439,11 +676,25 @@ export async function reportTaskService(
       },
     };
   }
+  let reviewTarget: ResolvedReviewTarget | null = null;
+  if (!hasEvidenceBlockers) {
+    const reviewTargetResult = resolveMandatoryReviewTarget({
+      roster,
+      requested: options.reviewer,
+      reporterAgentId: agentId,
+      cwd,
+      taskNumber,
+    });
+    if (!('ok' in reviewTargetResult)) return reviewTargetResult;
+    reviewTarget = reviewTargetResult.value;
+  }
+
   const now = new Date().toISOString();
   const reportAssignmentId = hasEvidenceBlockers ? `${assignmentId}:blocked` : assignmentId;
   const reportId = createReportId(taskFile.taskId, agentId, reportAssignmentId);
-  const obligationId = null;
-
+  const obligationId = reviewTarget
+    ? `obl_review_${safeIdPart(taskFile.taskId)}_${safeIdPart(reportId)}_${safeIdPart(reviewTargetIdPart(reviewTarget))}`
+    : null;
   const report: WorkResultReport = {
     report_id: reportId,
     task_number: taskNumber,
@@ -456,9 +707,8 @@ export async function reportTaskService(
     changed_files: changedFiles,
     verification,
     known_residuals: knownResiduals,
-    ready_for_review: false,
+    ready_for_review: !hasEvidenceBlockers,
     report_status: hasEvidenceBlockers ? 'blocked' : 'submitted',
-
   };
 
   const missingSections: string[] = [];
@@ -504,14 +754,9 @@ export async function reportTaskService(
         },
       };
     }
+    if (assignmentRecord) await saveAssignment(cwd, assignmentRecord);
   } else {
     const nextFrontMatter = { ...frontMatter, status: nextStatus } as typeof frontMatter;
-    if (!hasEvidenceBlockers) {
-      nextFrontMatter.closed_at = now;
-      nextFrontMatter.closed_by = agentId;
-      nextFrontMatter.governed_by = `task_report:${agentId}`;
-      nextFrontMatter.closure_mode = 'agent_finish';
-    }
     await writeTaskProjection(taskFile.path, nextFrontMatter, body);
 
     const store = options.store ?? openTaskLifecycleStore(cwd);
@@ -525,12 +770,38 @@ export async function reportTaskService(
       const persist = store.db.transaction(() => {
         persistReportInStore(store, report);
         store.releaseAssignment(activeAssignment.assignment_id, hasEvidenceBlockers ? 'blocked' : 'completed');
-        store.updateStatus(taskFile.taskId, nextStatus, agentId, !hasEvidenceBlockers ? {
-          closed_at: now,
-          closed_by: agentId,
-          governed_by: `task_report:${agentId}`,
-          closure_mode: 'agent_finish',
-        } : undefined);
+        store.updateStatus(taskFile.taskId, nextStatus, agentId);
+        if (reviewTarget && obligationId) {
+          store.upsertDirectedObligation({
+            obligation_id: obligationId,
+            source_kind: 'task_report',
+            source_ref: reportId,
+            source_agent_id: agentId,
+            target_agent_id: reviewTarget.target_agent_id,
+            target_role: reviewTarget.target_role,
+            target_ref: reviewTarget.requested,
+            kind: 'review_request',
+            status: 'open',
+            task_id: taskFile.taskId,
+            task_number: Number(taskNumber),
+            evidence_json: JSON.stringify({
+              report_id: reportId,
+              assignment_id: reportAssignmentId,
+              task_number: Number(taskNumber),
+              requested_target: reviewTarget.requested,
+              target_resolution: reviewTarget.resolution,
+            }),
+            consumption_rule_json: JSON.stringify({
+              consume_on: ['task_review', 'task_defer', 'delegation', 'rejection', 'completion'],
+              review_command: `narada task review ${taskNumber} --agent ${reviewCommandAgentPlaceholder(reviewTarget)} --verdict accepted --report ${reportId}`,
+            }),
+            created_at: now,
+            updated_at: now,
+            consumed_at: null,
+            consumed_by: null,
+            consumption_ref: null,
+          });
+        }
       });
       persist();
 
@@ -565,12 +836,20 @@ export async function reportTaskService(
       report_id: reportId,
       task_id: taskFile.taskId,
       agent_id: agentId,
-      new_status: nextStatus,
+      new_status: hasEvidenceBlockers ? 'needs_continuation' : 'in_review',
       assignment_id: reportAssignmentId,
       report_status: report.report_status,
-      ready_for_review: false,
+      ready_for_review: report.ready_for_review,
       obligation_id: obligationId,
-
+      review_target: reviewTarget
+        ? {
+            requested: reviewTarget.requested,
+            target_agent_id: reviewTarget.target_agent_id,
+            target_role: reviewTarget.target_role,
+            resolution: reviewTarget.resolution,
+            review_authority: reviewTarget.review_authority,
+          }
+        : undefined,
       ...(hasEvidenceBlockers ? {
         evidence_blockers: evidenceBlockers,
         evidence_posture: 'reported_with_incomplete_task_evidence' as const,

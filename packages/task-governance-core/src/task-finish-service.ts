@@ -100,6 +100,30 @@ function parseVerification(value: string | undefined): { exitCode: ExitCode; err
   }
 }
 
+function replaceMarkdownSection(body: string, heading: string, replacement: string): string {
+  const headingPattern = new RegExp(`^##\\s+${heading}\\s*$`, 'gim');
+  const match = headingPattern.exec(body);
+  if (!match) {
+    return `${body.trimEnd()}\n\n## ${heading}\n\n${replacement.trim()}\n`;
+  }
+  const start = match.index + match[0].length;
+  const rest = body.slice(start);
+  const nextHeading = rest.search(/^##\s+/m);
+  const end = nextHeading === -1 ? body.length : start + nextHeading;
+  return `${body.slice(0, start)}\n\n${replacement.trim()}\n${body.slice(end)}`;
+}
+
+function materializeFinishEvidenceSections(body: string, summary: string | undefined, verification: Array<{ command: string; result: string }>): string {
+  let next = body;
+  if (summary) {
+    next = replaceMarkdownSection(next, 'Execution Notes', summary);
+  }
+  if (verification.length > 0) {
+    next = replaceMarkdownSection(next, 'Verification', verification.map((entry) => `- ${entry.command}: ${entry.result}`).join('\n'));
+  }
+  return next;
+}
+
 function parseJsonStringList(value: string | undefined): { exitCode: ExitCode; error?: string } | { ok: true; value: string[] } {
   if (!value) {
     return { ok: true, value: [] };
@@ -213,18 +237,28 @@ async function proveCriteriaInService(params: {
     verification: projection.verification,
     acceptanceCriteriaState: criteria.map((text) => ({ text, checked: true })),
   });
+  const provedAt = new Date().toISOString();
+  const verificationBinding = { state: 'unbound', rationale: 'proof via task finish' };
+  store.upsertCriteriaProof({
+    proof_id: `criteria_proof_${taskFileId}_${provedAt}`,
+    task_id: taskFileId,
+    task_number: taskNum,
+    proved_by: by,
+    proved_at: provedAt,
+    criteria_json: JSON.stringify(criteria.map((text) => ({ text, checked: true }))),
+    verification_binding_json: JSON.stringify(verificationBinding),
+  });
 
   await writeTaskProjection(
     (await import('node:path')).join(cwd, '.ai', 'do-not-open', 'tasks', `${taskFileId}.md`),
     {
       ...frontMatter,
       criteria_proved_by: by,
-      criteria_proved_at: new Date().toISOString(),
-      criteria_proof_verification: { state: 'unbound', rationale: 'proof via task finish' },
+      criteria_proved_at: provedAt,
+      criteria_proof_verification: verificationBinding,
     },
     newBody,
   );
-
   const admission = await admitTaskEvidence({
     cwd,
     taskNumber: taskNum,
@@ -372,6 +406,8 @@ export async function finishTaskService(
   let criteriaProofAction: 'proved' | 'skipped' | 'blocked' = 'skipped';
   let criteriaProofBlockers: string[] = [];
   let submittedReportResult: ReportTaskServiceResult | null = null;
+  let suppressCloseForPendingReview = false;
+  let fallbackNewStatus: string | null = null;
 
   const existingReviews = await listReviewsForTask(cwd, taskFile.taskId);
   const existingReports = await listReportsForTask(cwd, taskFile.taskId);
@@ -566,10 +602,10 @@ export async function finishTaskService(
           if (proofOwn) proofOwn.db.close();
         }
       }
-
       const reportResult = await reportTaskService({
         taskNumber,
         agent: agentId,
+        reviewer: options.reviewer,
         summary: options.summary,
         directiveId: options.directiveId,
         changedFiles: options.changedFiles,
@@ -579,28 +615,57 @@ export async function finishTaskService(
         store: options.store,
       } as ReportTaskServiceOptions);
       if (reportResult.exitCode !== ExitCode.SUCCESS) {
-        return {
-          exitCode: reportResult.exitCode,
-          result: {
-            status: 'error',
-            completion_mode: 'report',
-            task_id: taskFile.taskId,
-            agent_id: agentId,
-            report_action: reportAction,
-            review_action: reviewAction,
-            report_id: null,
-            review_id: null,
-            evidence_verdict: 'unknown',
-            roster_transition: 'blocked',
-            close_action: 'skipped',
-            criteria_proof_action: 'skipped',
-            error: (reportResult.result as { error?: string })?.error,
-          },
-        };
+        const reportError = (reportResult.result as { error?: string })?.error;
+        const canCloseWithCriteriaProof = options.close === true
+          && options.proveCriteria === true
+          && criteriaProofAction === 'proved'
+          && reportError?.startsWith('Review routing failed:');
+        if (!canCloseWithCriteriaProof) {
+          return {
+            exitCode: reportResult.exitCode,
+            result: {
+              status: 'error',
+              completion_mode: 'report',
+              task_id: taskFile.taskId,
+              agent_id: agentId,
+              report_action: reportAction,
+              review_action: reviewAction,
+              report_id: null,
+              review_id: null,
+              evidence_verdict: 'unknown',
+              roster_transition: 'blocked',
+              close_action: 'skipped',
+              criteria_proof_action: criteriaProofAction,
+              ...(criteriaProofBlockers.length > 0 ? { criteria_proof_blockers: criteriaProofBlockers } : {}),
+              error: reportError,
+              ...(reportResult.result.evidence_blockers ? { evidence_blockers: reportResult.result.evidence_blockers } : {}),
+            },
+          };
+        }
+        const { frontMatter: latestFrontMatter, body: latestBody } = await readTaskFile(taskFile.path);
+        await writeTaskProjection(
+          taskFile.path,
+          latestFrontMatter,
+          materializeFinishEvidenceSections(latestBody, options.summary, parsedVerification.value),
+        );
+        const transitionStore = options.store ?? openTaskLifecycleStore(cwd);
+        try {
+          const lifecycle = transitionStore.getLifecycle(taskFile.taskId) ?? transitionStore.getLifecycleByNumber(Number(taskNumber));
+          if (lifecycle?.status === 'claimed') {
+            transitionStore.updateStatus(taskFile.taskId, 'in_review', agentId);
+            fallbackNewStatus = 'in_review';
+          }
+        } finally {
+          if (!options.store) transitionStore.db.close();
+        }
+        suppressCloseForPendingReview = true;
+        reportAction = 'skipped';
+      } else {
+        reportAction = 'submitted';
+        reportId = (reportResult.result as { report_id?: string }).report_id ?? null;
+        submittedReportResult = reportResult.result;
+        suppressCloseForPendingReview = true;
       }
-      reportAction = 'submitted';
-      reportId = (reportResult.result as { report_id?: string }).report_id ?? null;
-      submittedReportResult = reportResult.result;
     } else if (taskStatus === 'in_review') {
       reportAction = 'skipped';
     } else {
@@ -661,7 +726,9 @@ export async function finishTaskService(
   let closeAction: 'closed' | 'blocked' | 'skipped' = 'skipped';
   let closeBlockers: string[] = [];
 
-  if (options.close && criteriaProofAction === 'blocked') {
+  if (options.close && suppressCloseForPendingReview) {
+    closeAction = 'skipped';
+  } else if (options.close && criteriaProofAction === 'blocked') {
     closeAction = 'blocked';
     closeBlockers = ['Criteria proof failed before evidence admission'];
   } else if (options.close) {
@@ -757,6 +824,10 @@ export async function finishTaskService(
     if (submittedReportResult.evidence_blockers) {
       output.evidence_blockers = submittedReportResult.evidence_blockers;
     }
+  }
+  if (!submittedReportResult && fallbackNewStatus) {
+    output.ready_for_review = true;
+    output.new_status = fallbackNewStatus;
   }
 
   if (reviewReusePosture) {

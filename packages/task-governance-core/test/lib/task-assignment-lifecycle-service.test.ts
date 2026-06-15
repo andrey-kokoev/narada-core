@@ -334,7 +334,7 @@ describe('task assignment lifecycle service', () => {
     expect(result.result.error).toContain('task claim');
   });
 
-  it('releases completed tasks to closed and updates SQLite lifecycle and assignment row', async () => {
+  it('releases completed tasks to in_review and updates SQLite lifecycle and assignment row', async () => {
     await claimTaskService({ taskNumber: '999', agent: 'test-agent', cwd: tempDir });
 
     const result = await releaseTaskService({
@@ -347,10 +347,10 @@ describe('task assignment lifecycle service', () => {
     expect(result.result).toMatchObject({
       status: 'success',
       release_reason: 'completed',
-      new_status: 'closed',
+      new_status: 'in_review',
     });
     const taskContent = readFileSync(join(tempDir, '.ai', 'do-not-open', 'tasks', '20260420-999-test-task.md'), 'utf8');
-    expect(taskContent).toContain('status: closed');
+    expect(taskContent).toContain('status: in_review');
 
     const assignment = await loadAssignment(tempDir, '20260420-999-test-task');
     expect(assignment?.assignments[0]!.release_reason).toBe('completed');
@@ -358,7 +358,7 @@ describe('task assignment lifecycle service', () => {
 
     const store = openTaskLifecycleStore(tempDir);
     try {
-      expect(store.getLifecycle('20260420-999-test-task')?.status).toBe('closed');
+      expect(store.getLifecycle('20260420-999-test-task')?.status).toBe('in_review');
       expect(store.getActiveAssignment('20260420-999-test-task')).toBeUndefined();
     } finally {
       store.db.close();
