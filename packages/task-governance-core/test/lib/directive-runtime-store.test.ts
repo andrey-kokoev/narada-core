@@ -123,4 +123,62 @@ describe("SqliteDirectiveRuntimeStore", () => {
     expect(status.target).toContainEqual({ kind: "role", id: "resident" });
     expect(status.pending).toHaveLength(1);
   });
+
+  it("does not return terminal, stale, or operator-paused failed directives as pending", () => {
+    const retryable = store.emitResidentDirectiveForAdmittedWork({
+      siteId: "narada-sonar",
+      authorityLocus: "narada_sonar",
+      systemEmitterId: "narada-sonar.system.directive_emitter",
+      residentAgentId: "sonar.resident",
+      taskId: "task-retryable",
+      transitionId: "retryable",
+    }).directive;
+    const terminal = store.emitResidentDirectiveForAdmittedWork({
+      siteId: "narada-sonar",
+      authorityLocus: "narada_sonar",
+      systemEmitterId: "narada-sonar.system.directive_emitter",
+      residentAgentId: "sonar.resident",
+      taskId: "task-terminal",
+      transitionId: "terminal",
+    }).directive;
+    const stale = store.emitResidentDirectiveForAdmittedWork({
+      siteId: "narada-sonar",
+      authorityLocus: "narada_sonar",
+      systemEmitterId: "narada-sonar.system.directive_emitter",
+      residentAgentId: "sonar.resident",
+      taskId: "task-stale",
+      transitionId: "stale",
+    }).directive;
+    const paused = store.emitResidentDirectiveForAdmittedWork({
+      siteId: "narada-sonar",
+      authorityLocus: "narada_sonar",
+      systemEmitterId: "narada-sonar.system.directive_emitter",
+      residentAgentId: "sonar.resident",
+      taskId: "task-paused",
+      transitionId: "paused",
+    }).directive;
+
+    store.upsertDirective({
+      ...retryable,
+      delivery: { status: "failed", failure_reason: "control_jsonl_append_failed" } as any,
+    });
+    store.upsertDirective({
+      ...terminal,
+      delivery: { status: "failed", failure_reason: "terminal_outcome_superseded" } as any,
+    });
+    store.upsertDirective({
+      ...stale,
+      delivery: { status: "failed", failure_reason: "lease_expired_without_carrier_receipt" } as any,
+    });
+    store.upsertDirective({
+      ...paused,
+      delivery: { status: "failed", failure_reason: "operator_paused_duplicate_task_identity_collision" } as any,
+    });
+
+    const pending = store.listPending({ target: { kind: "agent", id: "sonar.resident" } });
+    expect(pending.map((directive) => directive.directive_id)).toContain(retryable.directive_id);
+    expect(pending.map((directive) => directive.directive_id)).not.toContain(terminal.directive_id);
+    expect(pending.map((directive) => directive.directive_id)).not.toContain(stale.directive_id);
+    expect(pending.map((directive) => directive.directive_id)).not.toContain(paused.directive_id);
+  });
 });

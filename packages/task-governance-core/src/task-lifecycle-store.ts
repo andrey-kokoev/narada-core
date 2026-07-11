@@ -40,6 +40,7 @@ export type TaskStatus =
   | "claimed"
   | "needs_continuation"
   | "in_review"
+  | "awaiting_dependencies"
   | "deferred"
   | "closed"
   | "confirmed";
@@ -72,6 +73,7 @@ export interface TaskAssignmentRow {
   assignment_id: string;
   task_id: string;
   agent_id: string;
+  agent_identity_ref_json?: string | null;
   claimed_at: string;
   released_at: string | null;
   release_reason: string | null;
@@ -88,6 +90,7 @@ export interface TaskReportRow {
   report_id: string;
   task_id: string;
   agent_id: string;
+  agent_identity_ref_json?: string | null;
   summary: string;
   changed_files_json: string | null;
   verification_json: string | null;
@@ -215,6 +218,22 @@ export interface ObservationArtifactRow {
   created_at: string;
 }
 
+export interface TaskConflictPolicyEvidenceRow {
+  evidence_id: string;
+  dependency_id: string;
+  required_task_id: string;
+  required_outcome_id: string;
+  agent_id: string;
+  effective_operator_identity: string | null;
+  gated_work_operator_identity: string | null;
+  conflict_detected: boolean;
+  policy_mode: string;
+  authorization_required: boolean;
+  authorization_basis_json: string | null;
+  annotation_recorded: boolean;
+  created_at: string;
+}
+
 export interface ReconciliationFindingRow {
   finding_id: string;
   task_id: string | null;
@@ -245,6 +264,7 @@ export interface ReportRecordRow {
   task_id: string;
   assignment_id: string;
   agent_id: string;
+  agent_identity_ref_json?: string | null;
   reported_at: string;
   report_json: string;
 }
@@ -264,6 +284,7 @@ export interface AgentRosterRow {
   agent_id: string;
   role: string;
   capabilities_json: string;
+  operator_identity?: string | null;
   first_seen_at: string;
   last_active_at: string;
   status: string;
@@ -311,7 +332,7 @@ export interface TaskLifecycleDetailRow extends TaskLifecycleRow {
   preferred_agent_id: string | null;
 }
 
-export type DirectedObligationKind = "review_request" | "handoff" | "expectation";
+export type DirectedObligationKind = "dependency_request" | "review_request" | "handoff" | "expectation";
 export type DirectedObligationStatus = "open" | "consumed" | "deferred" | "delegated" | "rejected" | "completed";
 
 export interface DirectedObligationRow {
@@ -333,6 +354,67 @@ export interface DirectedObligationRow {
   consumed_at: string | null;
   consumed_by: string | null;
   consumption_ref: string | null;
+}
+
+export type TaskDependencyKind = "review" | "verification" | "operator_decision" | "downstream_work";
+export type TaskDependencyStatus = "open" | "satisfied" | "blocked" | "deferred";
+export type TaskDependencyDispositionKind =
+  | "remediation_task"
+  | "covered_by_existing_task"
+  | "routed_obligation"
+  | "operator_decision_required"
+  | "operator_deferred"
+  | "out_of_scope_or_rejected";
+export type TaskDependencyDispositionStatus = "open" | "deferred" | "resolved" | "superseded";
+
+export interface TaskDependencyRow {
+  dependency_id: string;
+  parent_task_id: string;
+  required_task_id: string;
+  kind: TaskDependencyKind | string;
+  satisfying_outcomes_json: string;
+  status: TaskDependencyStatus | string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskOutcomeContractRow {
+  contract_id: string;
+  task_id: string;
+  outcome_type: string;
+  allowed_outcomes_json: string;
+  satisfying_outcomes_json: string;
+  blocking_outcomes_json: string;
+  required_fields_json: string;
+  capability_requirement: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskOutcomeRow {
+  outcome_id: string;
+  task_id: string;
+  contract_id: string;
+  agent_id: string;
+  outcome: string;
+  summary: string;
+  findings_json: string;
+  evidence_refs_json: string;
+  admitted_at: string;
+}
+
+export interface TaskDependencyDispositionRow {
+  disposition_id: string;
+  dependency_id: string;
+  required_outcome_id: string;
+  kind: TaskDependencyDispositionKind | string;
+  status: TaskDependencyDispositionStatus | string;
+  target_task_id: string | null;
+  routed_obligation_id: string | null;
+  authority_basis_json: string;
+  summary: string;
+  created_by: string;
+  created_at: string;
 }
 
 export interface TaskLifecycleStore {
@@ -386,6 +468,23 @@ export interface TaskLifecycleStore {
   insertReview(review: NewTaskReviewRow): void;
   listReviews(taskId: string): TaskReviewRow[];
   listAllReviews(): TaskReviewRow[];
+  upsertTaskDependency(row: TaskDependencyRow): void;
+  getTaskDependency(dependencyId: string): TaskDependencyRow | undefined;
+  listTaskDependenciesForParent(parentTaskId: string): TaskDependencyRow[];
+  listTaskDependenciesForRequired(requiredTaskId: string): TaskDependencyRow[];
+  upsertTaskOutcomeContract(row: TaskOutcomeContractRow): void;
+  getTaskOutcomeContract(contractId: string): TaskOutcomeContractRow | undefined;
+  getLatestTaskOutcomeContract(taskId: string): TaskOutcomeContractRow | undefined;
+  listTaskOutcomeContracts(taskId: string): TaskOutcomeContractRow[];
+  insertTaskOutcome(row: TaskOutcomeRow): void;
+  listTaskOutcomes(taskId: string): TaskOutcomeRow[];
+  getLatestTaskOutcome(taskId: string): TaskOutcomeRow | undefined;
+  upsertTaskDependencyDisposition(row: TaskDependencyDispositionRow): void;
+  listTaskDependencyDispositions(dependencyId: string): TaskDependencyDispositionRow[];
+  getLatestTaskDependencyDisposition(dependencyId: string, requiredOutcomeId?: string | null): TaskDependencyDispositionRow | undefined;
+  upsertTaskConflictPolicyEvidence(row: TaskConflictPolicyEvidenceRow): void;
+  listTaskConflictPolicyEvidence(dependencyId: string): TaskConflictPolicyEvidenceRow[];
+  getLatestTaskConflictPolicyEvidence(dependencyId: string, requiredOutcomeId?: string | null): TaskConflictPolicyEvidenceRow | undefined;
   insertDispatchPacket(packet: DispatchPacketRow): void;
   getActiveDispatchPacketForAssignment(assignmentId: string): DispatchPacketRow | undefined;
   getDispatchPacketsForTask(taskId: string): DispatchPacketRow[];
@@ -459,11 +558,88 @@ function rowToLifecycle(row: Record<string, unknown>): TaskLifecycleRow {
   };
 }
 
+function rowToTaskConflictPolicyEvidence(row: Record<string, unknown>): TaskConflictPolicyEvidenceRow {
+  return {
+    evidence_id: String(row.evidence_id),
+    dependency_id: String(row.dependency_id),
+    required_task_id: String(row.required_task_id),
+    required_outcome_id: String(row.required_outcome_id),
+    agent_id: String(row.agent_id),
+    effective_operator_identity: row.effective_operator_identity ? String(row.effective_operator_identity) : null,
+    gated_work_operator_identity: row.gated_work_operator_identity ? String(row.gated_work_operator_identity) : null,
+    conflict_detected: Number(row.conflict_detected) === 1,
+    policy_mode: String(row.policy_mode),
+    authorization_required: Number(row.authorization_required) === 1,
+    authorization_basis_json: row.authorization_basis_json ? String(row.authorization_basis_json) : null,
+    annotation_recorded: Number(row.annotation_recorded) === 1,
+    created_at: String(row.created_at),
+  };
+}
+
+function rowToTaskDependency(row: Record<string, unknown>): TaskDependencyRow {
+  return {
+    dependency_id: String(row.dependency_id),
+    parent_task_id: String(row.parent_task_id),
+    required_task_id: String(row.required_task_id),
+    kind: String(row.kind),
+    satisfying_outcomes_json: String(row.satisfying_outcomes_json),
+    status: String(row.status),
+    created_by: String(row.created_by),
+    created_at: String(row.created_at),
+  };
+}
+
+function rowToTaskOutcomeContract(row: Record<string, unknown>): TaskOutcomeContractRow {
+  return {
+    contract_id: String(row.contract_id),
+    task_id: String(row.task_id),
+    outcome_type: String(row.outcome_type),
+    allowed_outcomes_json: String(row.allowed_outcomes_json),
+    satisfying_outcomes_json: String(row.satisfying_outcomes_json),
+    blocking_outcomes_json: String(row.blocking_outcomes_json),
+    required_fields_json: String(row.required_fields_json),
+    capability_requirement: row.capability_requirement ? String(row.capability_requirement) : null,
+    created_by: String(row.created_by),
+    created_at: String(row.created_at),
+  };
+}
+
+function rowToTaskOutcome(row: Record<string, unknown>): TaskOutcomeRow {
+  return {
+    outcome_id: String(row.outcome_id),
+    task_id: String(row.task_id),
+    contract_id: String(row.contract_id),
+    agent_id: String(row.agent_id),
+    outcome: String(row.outcome),
+    summary: String(row.summary),
+    findings_json: String(row.findings_json),
+    evidence_refs_json: String(row.evidence_refs_json),
+    admitted_at: String(row.admitted_at),
+  };
+}
+
+function rowToTaskDependencyDisposition(row: Record<string, unknown>): TaskDependencyDispositionRow {
+  return {
+    disposition_id: String(row.disposition_id),
+    dependency_id: String(row.dependency_id),
+    required_outcome_id: String(row.required_outcome_id),
+    kind: String(row.kind),
+    status: String(row.status),
+    target_task_id: row.target_task_id ? String(row.target_task_id) : null,
+    routed_obligation_id: row.routed_obligation_id ? String(row.routed_obligation_id) : null,
+    authority_basis_json: String(row.authority_basis_json),
+    summary: String(row.summary),
+    created_by: String(row.created_by),
+    created_at: String(row.created_at),
+  };
+}
+
 function rowToAssignment(row: Record<string, unknown>): TaskAssignmentRow {
   return {
     assignment_id: String(row.assignment_id),
     task_id: String(row.task_id),
     agent_id: String(row.agent_id),
+    agent_identity_ref_json: row.agent_identity_ref_json ? String(row.agent_identity_ref_json) : null,
     claimed_at: String(row.claimed_at),
     released_at: row.released_at ? String(row.released_at) : null,
     release_reason: row.release_reason ? String(row.release_reason) : null,
@@ -476,6 +652,7 @@ function rowToReport(row: Record<string, unknown>): TaskReportRow {
     report_id: String(row.report_id),
     task_id: String(row.task_id),
     agent_id: String(row.agent_id),
+    agent_identity_ref_json: row.agent_identity_ref_json ? String(row.agent_identity_ref_json) : null,
     summary: String(row.summary),
     changed_files_json: row.changed_files_json
       ? String(row.changed_files_json)
@@ -627,6 +804,7 @@ function rowToReportRecord(row: Record<string, unknown>): ReportRecordRow {
     task_id: String(row.task_id),
     assignment_id: String(row.assignment_id),
     agent_id: String(row.agent_id),
+    agent_identity_ref_json: row.agent_identity_ref_json ? String(row.agent_identity_ref_json) : null,
     reported_at: String(row.reported_at),
     report_json: String(row.report_json),
   };
@@ -851,6 +1029,11 @@ const REQUIRED_LIFECYCLE_TABLES = [
   'task_report_records',
   'task_promotion_records',
   'task_reviews',
+  'task_dependencies',
+  'task_outcome_contracts',
+  'task_outcomes',
+  'task_dependency_dispositions',
+  'task_conflict_policy_evidence',
   'task_number_sequence',
   'dispatch_packets',
   'verification_runs',
@@ -899,6 +1082,21 @@ function ensureTaskReportsDirectiveIdColumn(db: Db): void {
   db.exec('create index if not exists idx_task_reports_directive_id on task_reports(directive_id);');
 }
 
+function ensureIdentityRefColumns(db: Db): void {
+  ensureColumn(db, 'task_assignments', 'agent_identity_ref_json', 'text');
+  ensureColumn(db, 'task_reports', 'agent_identity_ref_json', 'text');
+  ensureColumn(db, 'task_report_records', 'agent_identity_ref_json', 'text');
+}
+
+function ensureColumn(db: Db, tableName: string, columnName: string, columnType: string): void {
+  const columns = db
+    .prepare(`pragma table_info(${tableName})`)
+    .all() as Array<{ name?: string }>;
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(`alter table ${tableName} add column ${columnName} ${columnType};`);
+  }
+}
+
 export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
   const runtime = selectSqliteRuntime();
   assertSqliteRuntimeSupported(runtime);
@@ -917,6 +1115,7 @@ export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
     if (!hasCurrentLifecycleSchema(db)) {
       store.initSchema();
     }
+    ensureIdentityRefColumns(db);
     initializedLifecycleDbPaths.add(dbPath);
   }
   return store;
@@ -958,6 +1157,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
         assignment_id text primary key,
         task_id text not null,
         agent_id text not null,
+        agent_identity_ref_json text,
         claimed_at text not null,
         released_at text,
         release_reason text,
@@ -1102,6 +1302,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
         report_id text primary key,
         task_id text not null,
         agent_id text not null,
+        agent_identity_ref_json text,
         summary text not null,
         changed_files_json text,
         verification_json text,
@@ -1118,6 +1319,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
         task_id text not null,
         assignment_id text not null,
         agent_id text not null,
+        agent_identity_ref_json text,
         reported_at text not null,
         report_json text not null,
         foreign key (task_id) references task_lifecycle(task_id)
@@ -1156,6 +1358,103 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
 
       create index if not exists idx_task_reviews_task_id
         on task_reviews(task_id);
+
+      create table if not exists task_dependencies (
+        dependency_id text primary key,
+        parent_task_id text not null,
+        required_task_id text not null,
+        kind text not null,
+        satisfying_outcomes_json text not null,
+        status text not null,
+        created_by text not null,
+        created_at text not null,
+        foreign key (parent_task_id) references task_lifecycle(task_id),
+        foreign key (required_task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_dependencies_parent
+        on task_dependencies(parent_task_id, status);
+
+      create index if not exists idx_task_dependencies_required
+        on task_dependencies(required_task_id, status);
+
+      create table if not exists task_outcome_contracts (
+        contract_id text primary key,
+        task_id text not null,
+        outcome_type text not null,
+        allowed_outcomes_json text not null,
+        satisfying_outcomes_json text not null,
+        blocking_outcomes_json text not null,
+        required_fields_json text not null,
+        capability_requirement text,
+        created_by text not null,
+        created_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_outcome_contracts_task
+        on task_outcome_contracts(task_id, created_at desc);
+
+      create table if not exists task_outcomes (
+        outcome_id text primary key,
+        task_id text not null,
+        contract_id text not null,
+        agent_id text not null,
+        outcome text not null,
+        summary text not null,
+        findings_json text not null,
+        evidence_refs_json text not null,
+        admitted_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id),
+        foreign key (contract_id) references task_outcome_contracts(contract_id)
+      );
+
+      create index if not exists idx_task_outcomes_task
+        on task_outcomes(task_id, admitted_at desc);
+
+      create index if not exists idx_task_outcomes_contract
+        on task_outcomes(contract_id, admitted_at desc);
+
+      create table if not exists task_dependency_dispositions (
+        disposition_id text primary key,
+        dependency_id text not null,
+        required_outcome_id text not null,
+        kind text not null,
+        status text not null,
+        target_task_id text,
+        routed_obligation_id text,
+        authority_basis_json text not null,
+        summary text not null,
+        created_by text not null,
+        created_at text not null,
+        foreign key (dependency_id) references task_dependencies(dependency_id),
+        foreign key (required_outcome_id) references task_outcomes(outcome_id)
+      );
+
+      create index if not exists idx_task_dependency_dispositions_dependency
+        on task_dependency_dispositions(dependency_id, required_outcome_id, created_at desc);
+
+      create table if not exists task_conflict_policy_evidence (
+        evidence_id text primary key,
+        dependency_id text not null,
+        required_task_id text not null,
+        required_outcome_id text not null,
+        agent_id text not null,
+        effective_operator_identity text,
+        gated_work_operator_identity text,
+        conflict_detected integer not null,
+        policy_mode text not null,
+        authorization_required integer not null,
+        authorization_basis_json text,
+        annotation_recorded integer not null,
+        created_at text not null,
+        foreign key (dependency_id) references task_dependencies(dependency_id),
+        foreign key (required_task_id) references task_lifecycle(task_id),
+        foreign key (required_outcome_id) references task_outcomes(outcome_id)
+      );
+
+      create index if not exists idx_task_conflict_policy_evidence_dependency
+        on task_conflict_policy_evidence(dependency_id, required_outcome_id, created_at desc);
 
       create table if not exists task_number_sequence (
         singleton integer primary key check (singleton = 1),
@@ -1302,6 +1601,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
         agent_id text primary key,
         role text not null,
         capabilities_json text not null,
+        operator_identity text,
         first_seen_at text not null,
         last_active_at text not null,
         status text not null default 'idle',
@@ -1583,13 +1883,14 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   insertAssignment(assignment: TaskAssignmentRow): void {
     const stmt = this.db.prepare(`
       insert into task_assignments (
-        assignment_id, task_id, agent_id, claimed_at, released_at, release_reason, intent
-      ) values (?, ?, ?, ?, ?, ?, ?)
+        assignment_id, task_id, agent_id, agent_identity_ref_json, claimed_at, released_at, release_reason, intent
+      ) values (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       assignment.assignment_id,
       assignment.task_id,
       assignment.agent_id,
+      assignment.agent_identity_ref_json ?? null,
       assignment.claimed_at,
       assignment.released_at,
       assignment.release_reason,
@@ -2028,13 +2329,15 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
 
   insertReport(report: TaskReportRow): void {
     ensureTaskReportsDirectiveIdColumn(this.db);
+    ensureIdentityRefColumns(this.db);
     const stmt = this.db.prepare(`
       insert into task_reports (
-        report_id, task_id, agent_id, summary, changed_files_json, verification_json, directive_id, submitted_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?)
+        report_id, task_id, agent_id, agent_identity_ref_json, summary, changed_files_json, verification_json, directive_id, submitted_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(report_id) do update set
         task_id = excluded.task_id,
         agent_id = excluded.agent_id,
+        agent_identity_ref_json = excluded.agent_identity_ref_json,
         summary = excluded.summary,
         changed_files_json = excluded.changed_files_json,
         verification_json = excluded.verification_json,
@@ -2045,6 +2348,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       report.report_id,
       report.task_id,
       report.agent_id,
+      report.agent_identity_ref_json ?? null,
       report.summary,
       report.changed_files_json,
       report.verification_json,
@@ -2102,12 +2406,13 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   upsertReportRecord(record: ReportRecordRow): void {
     const stmt = this.db.prepare(`
       insert into task_report_records (
-        report_id, task_id, assignment_id, agent_id, reported_at, report_json
-      ) values (?, ?, ?, ?, ?, ?)
+        report_id, task_id, assignment_id, agent_id, agent_identity_ref_json, reported_at, report_json
+      ) values (?, ?, ?, ?, ?, ?, ?)
       on conflict(report_id) do update set
         task_id = excluded.task_id,
         assignment_id = excluded.assignment_id,
         agent_id = excluded.agent_id,
+        agent_identity_ref_json = excluded.agent_identity_ref_json,
         reported_at = excluded.reported_at,
         report_json = excluded.report_json
     `);
@@ -2116,6 +2421,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       record.task_id,
       record.assignment_id,
       record.agent_id,
+      record.agent_identity_ref_json ?? null,
       record.reported_at,
       record.report_json,
     );
@@ -2225,6 +2531,287 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       )
       .all() as Record<string, unknown>[];
     return rows.map(rowToReview);
+  }
+
+  upsertTaskDependency(row: TaskDependencyRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_dependencies (
+        dependency_id, parent_task_id, required_task_id, kind,
+        satisfying_outcomes_json, status, created_by, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(dependency_id) do update set
+        parent_task_id = excluded.parent_task_id,
+        required_task_id = excluded.required_task_id,
+        kind = excluded.kind,
+        satisfying_outcomes_json = excluded.satisfying_outcomes_json,
+        status = excluded.status
+    `);
+    stmt.run(
+      row.dependency_id,
+      row.parent_task_id,
+      row.required_task_id,
+      row.kind,
+      row.satisfying_outcomes_json,
+      row.status,
+      row.created_by,
+      row.created_at,
+    );
+  }
+
+  getTaskDependency(dependencyId: string): TaskDependencyRow | undefined {
+    const row = this.db
+      .prepare('select * from task_dependencies where dependency_id = ?')
+      .get(dependencyId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskDependency(row) : undefined;
+  }
+
+  listTaskDependenciesForParent(parentTaskId: string): TaskDependencyRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_dependencies
+         where parent_task_id = ?
+         order by created_at desc, rowid desc`,
+      )
+      .all(parentTaskId) as Record<string, unknown>[];
+    return rows.map(rowToTaskDependency);
+  }
+
+  listTaskDependenciesForRequired(requiredTaskId: string): TaskDependencyRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_dependencies
+         where required_task_id = ?
+         order by created_at desc, rowid desc`,
+      )
+      .all(requiredTaskId) as Record<string, unknown>[];
+    return rows.map(rowToTaskDependency);
+  }
+
+  upsertTaskOutcomeContract(row: TaskOutcomeContractRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_outcome_contracts (
+        contract_id, task_id, outcome_type, allowed_outcomes_json,
+        satisfying_outcomes_json, blocking_outcomes_json, required_fields_json,
+        capability_requirement, created_by, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(contract_id) do update set
+        task_id = excluded.task_id,
+        outcome_type = excluded.outcome_type,
+        allowed_outcomes_json = excluded.allowed_outcomes_json,
+        satisfying_outcomes_json = excluded.satisfying_outcomes_json,
+        blocking_outcomes_json = excluded.blocking_outcomes_json,
+        required_fields_json = excluded.required_fields_json,
+        capability_requirement = excluded.capability_requirement
+    `);
+    stmt.run(
+      row.contract_id,
+      row.task_id,
+      row.outcome_type,
+      row.allowed_outcomes_json,
+      row.satisfying_outcomes_json,
+      row.blocking_outcomes_json,
+      row.required_fields_json,
+      row.capability_requirement,
+      row.created_by,
+      row.created_at,
+    );
+  }
+
+  getTaskOutcomeContract(contractId: string): TaskOutcomeContractRow | undefined {
+    const row = this.db
+      .prepare('select * from task_outcome_contracts where contract_id = ?')
+      .get(contractId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskOutcomeContract(row) : undefined;
+  }
+
+  getLatestTaskOutcomeContract(taskId: string): TaskOutcomeContractRow | undefined {
+    const row = this.db
+      .prepare(
+        `select * from task_outcome_contracts
+         where task_id = ?
+         order by created_at desc, rowid desc
+         limit 1`,
+      )
+      .get(taskId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskOutcomeContract(row) : undefined;
+  }
+
+  listTaskOutcomeContracts(taskId: string): TaskOutcomeContractRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_outcome_contracts
+         where task_id = ?
+         order by created_at desc, rowid desc`,
+      )
+      .all(taskId) as Record<string, unknown>[];
+    return rows.map(rowToTaskOutcomeContract);
+  }
+
+  insertTaskOutcome(row: TaskOutcomeRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_outcomes (
+        outcome_id, task_id, contract_id, agent_id, outcome,
+        summary, findings_json, evidence_refs_json, admitted_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      row.outcome_id,
+      row.task_id,
+      row.contract_id,
+      row.agent_id,
+      row.outcome,
+      row.summary,
+      row.findings_json,
+      row.evidence_refs_json,
+      row.admitted_at,
+    );
+  }
+
+  listTaskOutcomes(taskId: string): TaskOutcomeRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_outcomes
+         where task_id = ?
+         order by admitted_at desc, rowid desc`,
+      )
+      .all(taskId) as Record<string, unknown>[];
+    return rows.map(rowToTaskOutcome);
+  }
+
+  getLatestTaskOutcome(taskId: string): TaskOutcomeRow | undefined {
+    const row = this.db
+      .prepare(
+        `select * from task_outcomes
+         where task_id = ?
+         order by admitted_at desc, rowid desc
+         limit 1`,
+      )
+      .get(taskId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskOutcome(row) : undefined;
+  }
+
+  upsertTaskDependencyDisposition(row: TaskDependencyDispositionRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_dependency_dispositions (
+        disposition_id, dependency_id, required_outcome_id, kind, status,
+        target_task_id, routed_obligation_id, authority_basis_json,
+        summary, created_by, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(disposition_id) do update set
+        dependency_id = excluded.dependency_id,
+        required_outcome_id = excluded.required_outcome_id,
+        kind = excluded.kind,
+        status = excluded.status,
+        target_task_id = excluded.target_task_id,
+        routed_obligation_id = excluded.routed_obligation_id,
+        authority_basis_json = excluded.authority_basis_json,
+        summary = excluded.summary
+    `);
+    stmt.run(
+      row.disposition_id,
+      row.dependency_id,
+      row.required_outcome_id,
+      row.kind,
+      row.status,
+      row.target_task_id,
+      row.routed_obligation_id,
+      row.authority_basis_json,
+      row.summary,
+      row.created_by,
+      row.created_at,
+    );
+  }
+
+  listTaskDependencyDispositions(dependencyId: string): TaskDependencyDispositionRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_dependency_dispositions
+         where dependency_id = ?
+         order by created_at desc, rowid desc`,
+      )
+      .all(dependencyId) as Record<string, unknown>[];
+    return rows.map(rowToTaskDependencyDisposition);
+  }
+
+  getLatestTaskDependencyDisposition(dependencyId: string, requiredOutcomeId?: string | null): TaskDependencyDispositionRow | undefined {
+    const query = requiredOutcomeId
+      ? `select * from task_dependency_dispositions
+         where dependency_id = ? and required_outcome_id = ?
+         order by created_at desc, rowid desc
+         limit 1`
+      : `select * from task_dependency_dispositions
+         where dependency_id = ?
+         order by created_at desc, rowid desc
+         limit 1`;
+    const row = requiredOutcomeId
+      ? this.db.prepare(query).get(dependencyId, requiredOutcomeId) as Record<string, unknown> | undefined
+      : this.db.prepare(query).get(dependencyId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskDependencyDisposition(row) : undefined;
+  }
+
+  upsertTaskConflictPolicyEvidence(row: TaskConflictPolicyEvidenceRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_conflict_policy_evidence (
+        evidence_id, dependency_id, required_task_id, required_outcome_id,
+        agent_id, effective_operator_identity, gated_work_operator_identity,
+        conflict_detected, policy_mode, authorization_required,
+        authorization_basis_json, annotation_recorded, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(evidence_id) do update set
+        dependency_id = excluded.dependency_id,
+        required_task_id = excluded.required_task_id,
+        required_outcome_id = excluded.required_outcome_id,
+        agent_id = excluded.agent_id,
+        effective_operator_identity = excluded.effective_operator_identity,
+        gated_work_operator_identity = excluded.gated_work_operator_identity,
+        conflict_detected = excluded.conflict_detected,
+        policy_mode = excluded.policy_mode,
+        authorization_required = excluded.authorization_required,
+        authorization_basis_json = excluded.authorization_basis_json,
+        annotation_recorded = excluded.annotation_recorded
+    `);
+    stmt.run(
+      row.evidence_id,
+      row.dependency_id,
+      row.required_task_id,
+      row.required_outcome_id,
+      row.agent_id,
+      row.effective_operator_identity,
+      row.gated_work_operator_identity,
+      row.conflict_detected ? 1 : 0,
+      row.policy_mode,
+      row.authorization_required ? 1 : 0,
+      row.authorization_basis_json,
+      row.annotation_recorded ? 1 : 0,
+      row.created_at,
+    );
+  }
+
+  listTaskConflictPolicyEvidence(dependencyId: string): TaskConflictPolicyEvidenceRow[] {
+    const rows = this.db
+      .prepare(
+        `select * from task_conflict_policy_evidence
+         where dependency_id = ?
+         order by created_at desc, rowid desc`,
+      )
+      .all(dependencyId) as Record<string, unknown>[];
+    return rows.map(rowToTaskConflictPolicyEvidence);
+  }
+
+  getLatestTaskConflictPolicyEvidence(dependencyId: string, requiredOutcomeId?: string | null): TaskConflictPolicyEvidenceRow | undefined {
+    const query = requiredOutcomeId
+      ? `select * from task_conflict_policy_evidence
+         where dependency_id = ? and required_outcome_id = ?
+         order by created_at desc, rowid desc
+         limit 1`
+      : `select * from task_conflict_policy_evidence
+         where dependency_id = ?
+         order by created_at desc, rowid desc
+         limit 1`;
+    const row = requiredOutcomeId
+      ? this.db.prepare(query).get(dependencyId, requiredOutcomeId) as Record<string, unknown> | undefined
+      : this.db.prepare(query).get(dependencyId) as Record<string, unknown> | undefined;
+    return row ? rowToTaskConflictPolicyEvidence(row) : undefined;
   }
 
   insertDispatchPacket(packet: DispatchPacketRow): void {
@@ -2619,12 +3206,13 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   upsertRosterEntry(entry: AgentRosterRow): void {
     const stmt = this.db.prepare(`
       insert into agent_roster (
-        agent_id, role, capabilities_json, first_seen_at, last_active_at,
+        agent_id, role, capabilities_json, operator_identity, first_seen_at, last_active_at,
         status, task_number, last_done, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(agent_id) do update set
         role = excluded.role,
         capabilities_json = excluded.capabilities_json,
+        operator_identity = excluded.operator_identity,
         first_seen_at = excluded.first_seen_at,
         last_active_at = excluded.last_active_at,
         status = excluded.status,
@@ -2636,6 +3224,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       entry.agent_id,
       entry.role,
       entry.capabilities_json,
+      entry.operator_identity ?? null,
       entry.first_seen_at,
       entry.last_active_at,
       entry.status,
@@ -2942,6 +3531,7 @@ function rowToRosterEntry(row: Record<string, unknown>): AgentRosterRow {
     agent_id: String(row.agent_id),
     role: String(row.role),
     capabilities_json: String(row.capabilities_json),
+    operator_identity: row.operator_identity ? String(row.operator_identity) : null,
     first_seen_at: String(row.first_seen_at),
     last_active_at: String(row.last_active_at),
     status: String(row.status),

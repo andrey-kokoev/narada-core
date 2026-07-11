@@ -41,6 +41,8 @@ export interface FinishTaskServiceOptions {
   proveCriteria?: boolean;
   cwd?: string;
   store?: TaskLifecycleStore;
+  allowReviewIntentReport?: boolean;
+  suppressLegacyReviewRouting?: boolean;
 }
 
 export interface FinishTaskServiceResponse {
@@ -80,6 +82,8 @@ export interface FinishTaskServiceResponse {
     new_status?: string;
     assignment_id?: string;
     obligation_id?: string | null;
+    legacy_review_routing_suppressed?: boolean;
+    dependency_native_review_routing?: boolean;
     evidence_posture?: 'reported_with_incomplete_task_evidence';
     evidence_blockers?: string[];
   };
@@ -155,6 +159,13 @@ function newestFirst(a: { reviewed_at: string; review_id: string }, b: { reviewe
   return time !== 0 ? time : b.review_id.localeCompare(a.review_id);
 }
 
+function isSubmittedWorkReport(report: WorkResultReport): boolean {
+  return report.report_status === 'submitted'
+    && report.ready_for_review !== false
+    && !report.assignment_id.endsWith(':blocked')
+    && !report.report_id.startsWith('blocked_');
+}
+
 function reviewMatchesRequestedVerdict(
   review: ReviewRecord,
   verdict?: FinishTaskServiceOptions['verdict'],
@@ -162,6 +173,14 @@ function reviewMatchesRequestedVerdict(
   if (!verdict) return isAcceptedReview(review);
   if (verdict === 'rejected') return isRejectedReview(review);
   return isAcceptedReview(review);
+}
+
+function isAfterReopenEpoch(timestamp: string | undefined | null, reopenedAt: string | null): boolean {
+  if (!reopenedAt) return true;
+  if (!timestamp) return false;
+  const timestampMs = Date.parse(timestamp);
+  const reopenedMs = Date.parse(reopenedAt);
+  return Number.isFinite(timestampMs) && Number.isFinite(reopenedMs) && timestampMs > reopenedMs;
 }
 
 async function proveCriteriaInService(params: {
@@ -390,9 +409,11 @@ export async function finishTaskService(
   const statusStore = options.store ?? openTaskLifecycleStore(cwd);
   const ownsStatusStore = options.store ? null : statusStore;
   let taskStatus = frontMatter.status as string | undefined;
+  let reopenedAt: string | null = null;
   try {
     const lifecycle = statusStore.getLifecycle(taskFile.taskId) ?? statusStore.getLifecycleByNumber(Number(taskNumber));
     taskStatus = lifecycle?.status ?? taskStatus;
+    reopenedAt = lifecycle?.reopened_at ?? null;
   } finally {
     if (ownsStatusStore) ownsStatusStore.db.close();
   }
@@ -411,7 +432,9 @@ export async function finishTaskService(
 
   const existingReviews = await listReviewsForTask(cwd, taskFile.taskId);
   const existingReports = await listReportsForTask(cwd, taskFile.taskId);
-  const myReviews = existingReviews
+  const currentReviews = existingReviews.filter((review) => isAfterReopenEpoch(review.reviewed_at, reopenedAt));
+  const currentReports = existingReports.filter((report) => isAfterReopenEpoch(report.reported_at, reopenedAt));
+  const myReviews = currentReviews
     .filter((review) => review.reviewer_agent_id === agentId)
     .sort(newestFirst);
   const validReviewVerdicts = ['accepted', 'accepted_with_notes', 'rejected'] as const;
@@ -440,7 +463,7 @@ export async function finishTaskService(
   }
   const reusableReview = myReviews.find((review) => reviewMatchesRequestedVerdict(review, options.verdict));
   const staleRejectedReviews = myReviews.filter(isRejectedReview);
-  const myReport = existingReports.find((report) => report.agent_id === agentId);
+  const myReport = currentReports.find((report) => report.agent_id === agentId && isSubmittedWorkReport(report));
   const completionMode = options.verdict !== undefined || Boolean(reusableReview) || (!myReport && taskStatus === 'in_review')
     ? 'review'
     : 'report';
@@ -613,6 +636,8 @@ export async function finishTaskService(
         residuals: options.residuals,
         cwd,
         store: options.store,
+        allowReviewIntentReport: options.allowReviewIntentReport,
+        suppressLegacyReviewRouting: options.suppressLegacyReviewRouting,
       } as ReportTaskServiceOptions);
       if (reportResult.exitCode !== ExitCode.SUCCESS) {
         const reportError = (reportResult.result as { error?: string })?.error;
@@ -818,6 +843,8 @@ export async function finishTaskService(
     output.new_status = submittedReportResult.new_status;
     output.assignment_id = submittedReportResult.assignment_id;
     output.obligation_id = submittedReportResult.obligation_id;
+    output.legacy_review_routing_suppressed = submittedReportResult.legacy_review_routing_suppressed;
+    output.dependency_native_review_routing = submittedReportResult.dependency_native_review_routing;
     if (submittedReportResult.evidence_posture) {
       output.evidence_posture = submittedReportResult.evidence_posture;
     }

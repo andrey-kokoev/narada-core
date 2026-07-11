@@ -1,5 +1,6 @@
 import { resolve, join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { taskAgentIdentityRefJson } from './agent-identity-ref.js';
 import {
   createReportId,
   findReportByAssignmentId,
@@ -43,6 +44,8 @@ export interface ReportTaskServiceOptions {
   residuals?: string;
   cwd?: string;
   store?: TaskLifecycleStore;
+  allowReviewIntentReport?: boolean;
+  suppressLegacyReviewRouting?: boolean;
 }
 
 export interface ReportTaskServiceResult {
@@ -57,6 +60,8 @@ export interface ReportTaskServiceResult {
   obligation_id?: string | null;
   report_status?: WorkResultReport['report_status'];
   ready_for_review?: boolean;
+  legacy_review_routing_suppressed?: boolean;
+  dependency_native_review_routing?: boolean;
   evidence_posture?: 'reported_with_incomplete_task_evidence';
   review_target?: {
     requested: string;
@@ -183,11 +188,13 @@ function loadSqlTaskStatus(cwd: string, taskId: string, taskNumber: string, prov
   }
 }
 function persistReportInStore(store: TaskLifecycleStore, report: WorkResultReport): void {
+  const agentIdentityRefJson = taskAgentIdentityRefJson(report.agent_id);
   store.upsertReportRecord({
     report_id: report.report_id,
     task_id: report.task_id,
     assignment_id: report.assignment_id,
     agent_id: report.agent_id,
+    agent_identity_ref_json: agentIdentityRefJson,
     reported_at: report.reported_at,
     report_json: JSON.stringify(report),
   });
@@ -195,6 +202,7 @@ function persistReportInStore(store: TaskLifecycleStore, report: WorkResultRepor
     report_id: report.report_id,
     task_id: report.task_id,
     agent_id: report.agent_id,
+    agent_identity_ref_json: agentIdentityRefJson,
     summary: report.summary,
     changed_files_json: JSON.stringify(report.changed_files),
     verification_json: JSON.stringify(report.verification),
@@ -588,7 +596,7 @@ export async function reportTaskService(
   const isContinuation = activeContinuation != null;
   const activeIntent = activeAssignment.intent ?? 'primary';
 
-  if (activeIntent === 'review' && isPrimary) {
+  if (activeIntent === 'review' && isPrimary && options.allowReviewIntentReport !== true) {
     return {
       exitCode: ExitCode.GENERAL_ERROR,
       result: {
@@ -666,7 +674,8 @@ export async function reportTaskService(
       },
     };
   }
-  const nextStatus = 'in_review';
+  const dependencyNativeReviewRouting = options.suppressLegacyReviewRouting === true && Boolean(options.reviewer);
+  const nextStatus = dependencyNativeReviewRouting ? 'awaiting_dependencies' : 'in_review';
   if (!isValidTransition(taskStatus, nextStatus)) {
     return {
       exitCode: ExitCode.GENERAL_ERROR,
@@ -771,7 +780,7 @@ export async function reportTaskService(
         persistReportInStore(store, report);
         store.releaseAssignment(activeAssignment.assignment_id, hasEvidenceBlockers ? 'blocked' : 'completed');
         store.updateStatus(taskFile.taskId, nextStatus, agentId);
-        if (reviewTarget && obligationId) {
+        if (!dependencyNativeReviewRouting && reviewTarget && obligationId) {
           store.upsertDirectedObligation({
             obligation_id: obligationId,
             source_kind: 'task_report',
@@ -836,11 +845,12 @@ export async function reportTaskService(
       report_id: reportId,
       task_id: taskFile.taskId,
       agent_id: agentId,
-      new_status: hasEvidenceBlockers ? 'needs_continuation' : 'in_review',
+      new_status: hasEvidenceBlockers ? 'needs_continuation' : nextStatus,
       assignment_id: reportAssignmentId,
       report_status: report.report_status,
       ready_for_review: report.ready_for_review,
-      obligation_id: obligationId,
+      obligation_id: dependencyNativeReviewRouting ? null : obligationId,
+      ...(dependencyNativeReviewRouting ? { legacy_review_routing_suppressed: true, dependency_native_review_routing: true } : {}),
       review_target: reviewTarget
         ? {
             requested: reviewTarget.requested,

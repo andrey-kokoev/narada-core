@@ -7,10 +7,12 @@
 
 import { readFile, writeFile, readdir, rename, open, unlink, stat, mkdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
+import { taskAgentIdentityRefJson } from './agent-identity-ref.js';
 import type { TaskLifecycleStore, AgentRosterRow } from './task-lifecycle-store.js';
 import { openTaskLifecycleStore } from './task-lifecycle-store.js';
 import { hasMaterialSection, parseTaskSpecFromMarkdown } from './task-spec.js';
 import { analyzePrototypeClosure, type PrototypeClosurePosture } from './prototype-closure.js';
+import { evaluateTaskDependencySatisfaction } from './task-dependency-satisfaction.js';
 
 export interface AgentRosterEntry {
   agent_id: string;
@@ -291,6 +293,7 @@ export function getReportPath(cwd: string, reportId: string): string {
 export async function saveReport(cwd: string, report: WorkResultReport): Promise<void> {
   const store = openTaskLifecycleStore(cwd);
   try {
+    const agentIdentityRefJson = taskAgentIdentityRefJson(report.agent_id);
     const existingLifecycle = store.getLifecycle(report.task_id);
     if (!existingLifecycle) {
       const taskNumber = Number(report.task_number);
@@ -315,6 +318,7 @@ export async function saveReport(cwd: string, report: WorkResultReport): Promise
       task_id: report.task_id,
       assignment_id: report.assignment_id,
       agent_id: report.agent_id,
+      agent_identity_ref_json: agentIdentityRefJson,
       reported_at: report.reported_at,
       report_json: JSON.stringify(report),
     });
@@ -322,6 +326,7 @@ export async function saveReport(cwd: string, report: WorkResultReport): Promise
       report_id: report.report_id,
       task_id: report.task_id,
       agent_id: report.agent_id,
+      agent_identity_ref_json: agentIdentityRefJson,
       summary: report.summary,
       changed_files_json: JSON.stringify(report.changed_files),
       verification_json: JSON.stringify(report.verification),
@@ -834,10 +839,15 @@ export async function inspectTaskEvidence(
 
   const reviews = await listReviewsForTask(cwd, taskFile.taskId);
   const sqliteReviews = store ? store.listReviews(taskFile.taskId) : [];
-  const hasReview = reviews.length > 0 || sqliteReviews.length > 0;
+  const dependencySatisfaction = store ? evaluateTaskDependencySatisfaction(store, taskFile.taskId) : null;
+  const satisfiedReviewDependency = dependencySatisfaction?.dependencies.some(
+    (dependency) => dependency.dependency_kind === 'review' && dependency.satisfied,
+  ) ?? false;
+  const hasReview = reviews.length > 0 || sqliteReviews.length > 0 || satisfiedReviewDependency;
   const hasAcceptedReview =
     reviews.some((r) => r.verdict === 'accepted' || r.verdict === 'accepted_with_notes') ||
-    sqliteReviews.some((r) => r.verdict === 'accepted');
+    sqliteReviews.some((r) => r.verdict === 'accepted') ||
+    satisfiedReviewDependency;
 
   const closures = num !== null ? await listClosureDecisionsForTask(cwd, num) : [];
   const hasClosure = closures.length > 0 || lifecycle?.closed_at != null;
@@ -1020,7 +1030,7 @@ export function checkRoleEligibility(
       from directed_obligations
       where task_id = ?
         and status = 'open'
-        and kind in ('review_request', 'handoff', 'expectation')
+        and kind in ('dependency_request', 'review_request', 'handoff', 'expectation')
       order by created_at asc
       limit 1
     `)
@@ -1377,6 +1387,7 @@ export async function saveAssignment(cwd: string, record: TaskAssignmentRecord):
           assignment_id: assignmentId,
           task_id: record.task_id,
           agent_id: assignment.agent_id,
+          agent_identity_ref_json: taskAgentIdentityRefJson(assignment.agent_id),
           claimed_at: assignment.claimed_at,
           released_at: assignment.released_at ?? null,
           release_reason: assignment.release_reason ?? null,
@@ -1602,7 +1613,7 @@ export async function writeTaskProjection(path: string, frontMatter: TaskFrontMa
 /**
  * Valid task statuses per the state machine schema.
  */
-export const TASK_STATUSES = ['draft', 'opened', 'claimed', 'needs_continuation', 'in_review', 'deferred', 'closed', 'confirmed'] as const;
+export const TASK_STATUSES = ['draft', 'opened', 'claimed', 'needs_continuation', 'in_review', 'awaiting_dependencies', 'deferred', 'closed', 'confirmed'] as const;
 export type TaskStatus = typeof TASK_STATUSES[number];
 
 /**
@@ -1611,9 +1622,10 @@ export type TaskStatus = typeof TASK_STATUSES[number];
 const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   draft: ['opened'],
   opened: ['claimed', 'closed', 'deferred'],
-  claimed: ['in_review', 'opened', 'needs_continuation', 'deferred'],
+  claimed: ['in_review', 'awaiting_dependencies', 'opened', 'needs_continuation', 'deferred', 'closed'],
   needs_continuation: ['claimed', 'opened', 'deferred'],
-  in_review: ['closed', 'opened', 'needs_continuation', 'deferred'],
+  in_review: ['closed', 'opened', 'needs_continuation', 'awaiting_dependencies', 'deferred'],
+  awaiting_dependencies: ['closed', 'opened', 'needs_continuation', 'deferred'],
   deferred: ['opened'],
   closed: ['confirmed', 'opened', 'in_review'],
   confirmed: ['opened', 'in_review'],

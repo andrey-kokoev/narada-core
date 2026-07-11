@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { taskAgentIdentityRefJson } from './agent-identity-ref.js';
 import {
   findTaskFile,
   isValidTransition,
@@ -15,7 +16,7 @@ import {
   inspectTaskEvidence,
 } from './task-governance.js';
 import { admitTaskEvidence } from './evidence-admission.js';
-import { openTaskLifecycleStore, type TaskLifecycleStore, type TaskStatus } from './task-lifecycle-store.js';
+import { openTaskLifecycleStore, type TaskDependencyRow, type TaskLifecycleStore, type TaskOutcomeContractRow, type TaskOutcomeRow, type TaskStatus } from './task-lifecycle-store.js';
 import { closeTaskService } from './task-close-service.js';
 import { ExitCode } from './exit-codes.js';
 import { analyzePrototypeClosure, type PrototypeClosurePosture } from './prototype-closure.js';
@@ -36,6 +37,24 @@ export interface ReviewTaskServiceOptions {
   noCapaReason?: string;
   cwd?: string;
   store?: TaskLifecycleStore;
+  enforceReviewAuthority?: boolean;
+  suppressLegacyReviewRow?: boolean;
+}
+
+function reviewOutcomeForVerdict(verdict: 'accepted' | 'accepted_with_notes' | 'rejected'): string {
+  return verdict;
+}
+
+function findReviewDependencyContract(store: TaskLifecycleStore, parentTaskId: string): {
+  dependency: TaskDependencyRow;
+  contract: TaskOutcomeContractRow;
+} | null {
+  const dependency = store.listTaskDependenciesForParent(parentTaskId)
+    .find((candidate) => candidate.kind === 'review');
+  if (!dependency) return null;
+  const contract = store.getLatestTaskOutcomeContract(dependency.required_task_id);
+  if (!contract) return null;
+  return { dependency, contract };
 }
 
 export type ReviewFindingPosture = 'blocking' | 'non_blocking' | 'compatibility_only' | 'projection_only';
@@ -97,6 +116,10 @@ export interface ReviewTaskServiceResponse {
       no_workaround: string;
     };
     review_authority?: ReviewAuthorityAdmission;
+    dependency?: TaskDependencyRow;
+    outcome_contract?: TaskOutcomeContractRow;
+    task_outcome?: TaskOutcomeRow;
+    legacy_review_row_suppressed?: boolean;
     generated_artifact_authority_note?: GeneratedArtifactAuthorityNote;
     closure_posture?: PrototypeClosurePosture | Record<string, unknown>;
     closure_claim?: PrototypeClosurePosture;
@@ -339,7 +362,7 @@ export async function reviewTaskService(
     };
   }
   const reviewAuthority = explainTaskReviewAuthority(agent);
-  if (!hasTaskReviewAuthority(agent)) {
+  if (options.enforceReviewAuthority !== false && !hasTaskReviewAuthority(agent)) {
     return {
       exitCode: ExitCode.GENERAL_ERROR,
       result: {
@@ -568,7 +591,63 @@ export async function reviewTaskService(
     report_id: options.report ?? null,
   };
 
-  if (store) {
+  let dependencyOutcome: {
+    dependency: TaskDependencyRow;
+    contract: TaskOutcomeContractRow;
+    outcome: TaskOutcomeRow;
+  } | null = null;
+  if (options.suppressLegacyReviewRow === true) {
+    if (!store) {
+      closeOwnStore();
+      return {
+        exitCode: ExitCode.GENERAL_ERROR,
+        result: {
+          status: 'error',
+          error: 'dependency_native_review_requires_lifecycle_store',
+        },
+      };
+    }
+    const dependencyContract = findReviewDependencyContract(store, taskFile.taskId);
+    if (!dependencyContract) {
+      closeOwnStore();
+      return {
+        exitCode: ExitCode.GENERAL_ERROR,
+        result: {
+          status: 'error',
+          error: 'review_dependency_contract_required',
+          task_id: taskFile.taskId,
+          remediation: ['Create a review dependency task with an outcome contract before suppressing legacy review rows.'],
+        },
+      };
+    }
+    const allowedOutcomes = JSON.parse(dependencyContract.contract.allowed_outcomes_json) as unknown;
+    const outcome = reviewOutcomeForVerdict(verdict);
+    if (!Array.isArray(allowedOutcomes) || !allowedOutcomes.includes(outcome)) {
+      closeOwnStore();
+      return {
+        exitCode: ExitCode.GENERAL_ERROR,
+        result: {
+          status: 'error',
+          error: 'review_outcome_not_allowed_by_dependency_contract',
+          task_id: taskFile.taskId,
+          verdict,
+        },
+      };
+    }
+    const taskOutcome: TaskOutcomeRow = {
+      outcome_id: `outcome_${reviewId}`,
+      task_id: dependencyContract.dependency.required_task_id,
+      contract_id: dependencyContract.contract.contract_id,
+      agent_id: agentId,
+      outcome,
+      summary: verdict === 'rejected' ? 'Review rejected through dependency outcome.' : 'Review accepted through dependency outcome.',
+      findings_json: JSON.stringify(findings),
+      evidence_refs_json: JSON.stringify([{ kind: 'legacy_review_service_dependency_native', parent_task_id: taskFile.taskId, review_id: reviewId }]),
+      admitted_at: now,
+    };
+    store.insertTaskOutcome(taskOutcome);
+    dependencyOutcome = { dependency: dependencyContract.dependency, contract: dependencyContract.contract, outcome: taskOutcome };
+  } else if (store) {
     store.insertReview({
       review_id: reviewId,
       reviewer_agent_id: agentId,
@@ -623,8 +702,12 @@ export async function reviewTaskService(
           store.upsertReportRecord({
             task_id: next.task_id,
             report_id: next.report_id,
+            assignment_id: next.assignment_id,
+            agent_id: next.agent_id,
+            agent_identity_ref_json: existing.agent_identity_ref_json ?? taskAgentIdentityRefJson(next.agent_id),
+            reported_at: next.reported_at,
             report_json: JSON.stringify(next),
-          } as Parameters<typeof store.upsertReportRecord>[0]);
+          });
         } catch {
           await saveReport(cwd, updatedReport);
         }
@@ -683,7 +766,7 @@ export async function reviewTaskService(
 
   const result: ReviewTaskServiceResponse['result'] = {
     status: 'success',
-    review_id: reviewId,
+    review_id: options.suppressLegacyReviewRow === true ? undefined : reviewId,
     task_id: taskFile.taskId,
     verdict,
     review_verdict_status: verdict === 'rejected' ? 'rejected' : 'accepted',
@@ -694,6 +777,12 @@ export async function reviewTaskService(
     review_authority: reviewAuthority,
     generated_artifact_authority_note: GENERATED_ARTIFACT_AUTHORITY_NOTE,
   };
+  if (dependencyOutcome) {
+    result.legacy_review_row_suppressed = true;
+    result.dependency = dependencyOutcome.dependency;
+    result.outcome_contract = dependencyOutcome.contract;
+    result.task_outcome = dependencyOutcome.outcome;
+  }
   if (reviewDiagnostics.findings.length > 0) {
     result.review_diagnostics = reviewDiagnostics;
   }

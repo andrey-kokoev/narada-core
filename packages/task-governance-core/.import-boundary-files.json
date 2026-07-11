@@ -1,4 +1,5 @@
 [
+  "src/agent-identity-ref.ts",
   "src/assignment-intent.ts",
   "src/directive-runtime-store.ts",
   "src/evidence-admission.ts",

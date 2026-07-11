@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { admitTaskEvidence } from '../../src/evidence-admission.js';
 import { openTaskLifecycleStore } from '../../src/task-lifecycle-store.js';
+import { evaluateTaskDependencySatisfaction } from '../../src/task-dependency-satisfaction.js';
 
 describe('evidence admission', () => {
   let tempDir: string;
@@ -116,5 +117,154 @@ describe('evidence admission', () => {
 
     expect(admission.result.verdict).toBe('rejected');
     expect(admission.blockers.join(' ')).toContain('acceptance criteria');
+  });
+
+  it('admits review-gated evidence from satisfied dependency outcome without review rows', async () => {
+    const store = openTaskLifecycleStore(tempDir);
+    try {
+      store.upsertLifecycle({
+        task_id: '20260425-654-review-evidence',
+        task_number: 654,
+        status: 'closed',
+        governed_by: 'review',
+        closed_at: '2026-04-25T12:05:00.000Z',
+        closed_by: 'reviewer',
+        closure_mode: 'peer_reviewed',
+        reopened_at: null,
+        reopened_by: null,
+        continuation_packet_json: null,
+        updated_at: '2026-04-25T12:05:00.000Z',
+      });
+      store.upsertTaskDependency({
+        dependency_id: 'dep-review-653-654',
+        parent_task_id: '20260425-653-evidence',
+        required_task_id: '20260425-654-review-evidence',
+        kind: 'review',
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        status: 'open',
+        created_by: 'agent',
+        created_at: '2026-04-25T12:03:00.000Z',
+      });
+      store.upsertTaskOutcomeContract({
+        contract_id: 'contract-review-654',
+        task_id: '20260425-654-review-evidence',
+        outcome_type: 'review',
+        allowed_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes', 'rejected']),
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        blocking_outcomes_json: JSON.stringify(['rejected']),
+        required_fields_json: JSON.stringify(['summary']),
+        capability_requirement: 'review',
+        created_by: 'agent',
+        created_at: '2026-04-25T12:03:00.000Z',
+      });
+      store.insertTaskOutcome({
+        outcome_id: 'outcome-review-654',
+        task_id: '20260425-654-review-evidence',
+        contract_id: 'contract-review-654',
+        agent_id: 'reviewer',
+        outcome: 'accepted',
+        summary: 'Dependency review accepted.',
+        findings_json: JSON.stringify([]),
+        evidence_refs_json: JSON.stringify([]),
+        admitted_at: '2026-04-25T12:04:00.000Z',
+      });
+      expect(store.listReviews('20260425-653-evidence')).toEqual([]);
+    } finally {
+      store.db.close();
+    }
+
+    const admission = await admitTaskEvidence({
+      cwd: tempDir,
+      taskNumber: 653,
+      admittedBy: 'agent',
+      methods: ['review'],
+      requireReview: true,
+    });
+
+    const confirmation = JSON.parse(admission.result.confirmation_json);
+    expect(admission.result.verdict).toBe('admitted');
+    expect(confirmation.latest_review_id).toBe(null);
+    expect(confirmation.dependency_satisfaction.all_satisfied).toBe(true);
+    expect(confirmation.dependency_satisfaction.dependencies[0].required_outcome_id).toBe('outcome-review-654');
+  });
+
+  it('treats accepted disposition as satisfying a blocking dependency outcome', () => {
+    const store = openTaskLifecycleStore(tempDir);
+    try {
+      store.upsertLifecycle({
+        task_id: '20260425-655-review-evidence',
+        task_number: 655,
+        status: 'closed',
+        governed_by: 'review',
+        closed_at: '2026-04-25T12:05:00.000Z',
+        closed_by: 'reviewer',
+        closure_mode: 'peer_reviewed',
+        reopened_at: null,
+        reopened_by: null,
+        continuation_packet_json: null,
+        updated_at: '2026-04-25T12:05:00.000Z',
+      });
+      store.upsertTaskDependency({
+        dependency_id: 'dep-review-653-655',
+        parent_task_id: '20260425-653-evidence',
+        required_task_id: '20260425-655-review-evidence',
+        kind: 'review',
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        status: 'open',
+        created_by: 'agent',
+        created_at: '2026-04-25T12:03:00.000Z',
+      });
+      store.upsertTaskOutcomeContract({
+        contract_id: 'contract-review-655',
+        task_id: '20260425-655-review-evidence',
+        outcome_type: 'review',
+        allowed_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes', 'rejected']),
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        blocking_outcomes_json: JSON.stringify(['rejected']),
+        required_fields_json: JSON.stringify(['summary']),
+        capability_requirement: 'review',
+        created_by: 'agent',
+        created_at: '2026-04-25T12:03:00.000Z',
+      });
+      store.insertTaskOutcome({
+        outcome_id: 'outcome-review-655',
+        task_id: '20260425-655-review-evidence',
+        contract_id: 'contract-review-655',
+        agent_id: 'reviewer',
+        outcome: 'rejected',
+        summary: 'Dependency review rejected with deferred disposition.',
+        findings_json: JSON.stringify([{ severity: 'blocking', description: 'Deferred by operator.' }]),
+        evidence_refs_json: JSON.stringify([]),
+        admitted_at: '2026-04-25T12:04:00.000Z',
+      });
+
+      const beforeDisposition = evaluateTaskDependencySatisfaction(store, '20260425-653-evidence');
+      expect(beforeDisposition.all_satisfied).toBe(false);
+      expect(beforeDisposition.dependencies[0].state).toBe('blocking_outcome');
+      expect(beforeDisposition.dependencies[0].disposition_required).toBe(true);
+
+      store.upsertTaskDependencyDisposition({
+        disposition_id: 'disp-review-655',
+        dependency_id: 'dep-review-653-655',
+        required_outcome_id: 'outcome-review-655',
+        kind: 'operator_deferred',
+        status: 'deferred',
+        target_task_id: null,
+        routed_obligation_id: null,
+        authority_basis_json: JSON.stringify({ kind: 'operator_direct_instruction', summary: 'Operator accepted deferral.' }),
+        summary: 'Operator explicitly deferred remediation.',
+        created_by: 'operator',
+        created_at: '2026-04-25T12:06:00.000Z',
+      });
+
+      const afterDisposition = evaluateTaskDependencySatisfaction(store, '20260425-653-evidence');
+      expect(afterDisposition.all_satisfied).toBe(true);
+      expect(afterDisposition.dependencies[0].state).toBe('blocking_outcome');
+      expect(afterDisposition.dependencies[0].satisfied).toBe(true);
+      expect(afterDisposition.dependencies[0].disposition_required).toBe(false);
+      expect(afterDisposition.dependencies[0].blocking_reason).toBe(null);
+    } finally {
+      store.db.close();
+    }
   });
 });

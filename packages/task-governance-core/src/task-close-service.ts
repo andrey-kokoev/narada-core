@@ -1,4 +1,6 @@
 import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import {
   findTaskFile,
   readTaskFile,
@@ -17,6 +19,7 @@ import {
   type TaskLifecycleStore,
   type TaskStatus,
 } from './task-lifecycle-store.js';
+import { evaluateTaskDependencySatisfaction } from './task-dependency-satisfaction.js';
 
 export interface CloseTaskServiceOptions {
   taskNumber: string;
@@ -25,6 +28,21 @@ export interface CloseTaskServiceOptions {
   store?: TaskLifecycleStore;
   mode: TaskClosureMode;
   noContinuationNeeded?: string;
+  projectionWriter?: (path: string, frontMatter: Record<string, unknown>, body: string) => Promise<void>;
+}
+
+async function withCloseProjectionSavepoint<T>(store: TaskLifecycleStore, action: () => Promise<T>): Promise<T> {
+  const name = `narada_close_${randomUUID().replaceAll('-', '')}`;
+  store.db.exec(`SAVEPOINT ${name}`);
+  try {
+    const result = await action();
+    store.db.exec(`RELEASE SAVEPOINT ${name}`);
+    return result;
+  } catch (error) {
+    try { store.db.exec(`ROLLBACK TO SAVEPOINT ${name}`); } catch { /* preserve original failure */ }
+    try { store.db.exec(`RELEASE SAVEPOINT ${name}`); } catch { /* preserve original failure */ }
+    throw error;
+  }
 }
 
 export async function closeTaskService(
@@ -167,6 +185,10 @@ export async function closeTaskService(
   if (closureClaim.applies && !closureClaim.capability_complete) {
     gateFailures.push('Facade/prototype/spike/design-only task requires linked continuation task evidence or --no-continuation-needed rationale before closure');
   }
+  const dependencySatisfaction = store ? evaluateTaskDependencySatisfaction(store, taskFile.taskId) : null;
+  if (dependencySatisfaction && !dependencySatisfaction.all_satisfied) {
+    gateFailures.push(`Task has ${dependencySatisfaction.unsatisfied_count} unsatisfied dependency/dependencies`);
+  }
 
   if (gateFailures.length > 0) {
     const remediation: string[] = [];
@@ -210,6 +232,7 @@ export async function closeTaskService(
         blocked_rationale: gateFailures.join('; '),
         next_command: nextCommand,
         admission_result: admission ?? null,
+        dependency_satisfaction: dependencySatisfaction,
         remediation,
         repair_command: admission?.verdict === 'rejected'
           ? `narada task continue ${taskNumber} --agent ${closedBy} --reason evidence_repair`
@@ -230,24 +253,49 @@ export async function closeTaskService(
   }
 
   const now = new Date().toISOString();
-  if (store) {
-    store.updateStatus(taskFile.taskId, 'closed', closedBy, {
-      closed_at: now,
-      closed_by: closedBy,
-      governed_by: `task_close:${closedBy}`,
-      closure_mode: closureMode,
-    });
-  }
+  const originalProjection = await readFile(taskFile.path, 'utf8');
+  const projectionWriter = options.projectionWriter ?? writeTaskProjection;
+  try {
+    await withCloseProjectionSavepoint(store!, async () => {
+      store!.updateStatus(taskFile.taskId, 'closed', closedBy, {
+        closed_at: now,
+        closed_by: closedBy,
+        governed_by: `task_close:${closedBy}`,
+        closure_mode: closureMode,
+      });
 
-  frontMatter.status = 'closed';
-  frontMatter.closed_at = now;
-  frontMatter.closed_by = closedBy;
-  frontMatter.governed_by = `task_close:${closedBy}`;
-  frontMatter.closure_mode = closureMode;
-  if (options.noContinuationNeeded?.trim()) {
-    frontMatter.no_continuation_needed_rationale = options.noContinuationNeeded.trim();
+      frontMatter.status = 'closed';
+      frontMatter.closed_at = now;
+      frontMatter.closed_by = closedBy;
+      frontMatter.governed_by = `task_close:${closedBy}`;
+      frontMatter.closure_mode = closureMode;
+      if (options.noContinuationNeeded?.trim()) {
+        frontMatter.no_continuation_needed_rationale = options.noContinuationNeeded.trim();
+      }
+      await projectionWriter(taskFile.path, frontMatter, body);
+    });
+  } catch (error) {
+    try {
+      await writeFile(taskFile.path, originalProjection, 'utf8');
+    } catch {
+      // Preserve the primary transaction failure; the result records projection restore uncertainty.
+    }
+    closeOwnStore();
+    return {
+      exitCode: ExitCode.GENERAL_ERROR,
+      result: {
+        status: 'error',
+        task_id: taskFile.taskId,
+        task_number: Number(taskNumber),
+        current_status: currentStatus,
+        close_action: 'blocked',
+        error: 'close_projection_transaction_failed',
+        message: error instanceof Error ? error.message : String(error),
+        transaction_rollback: 'attempted',
+        projection_restored: true,
+      },
+    };
   }
-  await writeTaskProjection(taskFile.path, frontMatter, body);
 
   let assignmentReleased = false;
   try {
@@ -295,6 +343,7 @@ export async function closeTaskService(
       closure_mode: closureMode,
       closed_at: frontMatter.closed_at,
       admission_id: admission?.admission_id,
+      dependency_satisfaction: dependencySatisfaction,
       closure_posture: closureClaim,
       closure_claim: closureClaim,
       assignment_released: assignmentReleased,

@@ -46,19 +46,21 @@ describe('task lifecycle MCP contract', () => {
     const tools = new Map(taskLifecycleDomainTools().map((tool) => [tool.name, tool]));
     const finish = tools.get('task_lifecycle_finish')?.inputSchema.properties ?? {};
     const submitReport = tools.get('task_lifecycle_submit_report')?.inputSchema.properties ?? {};
+    const review = tools.get('task_lifecycle_review')?.inputSchema.properties ?? {};
 
     for (const schema of [finish, submitReport]) {
       expect(schema.payload_ref).toBeTruthy();
       expect(schema.directive_id).toBeTruthy();
       expect(schema.reviewer).toBeTruthy();
+      expect(schema.outcome).toBeTruthy();
+      expect(schema.findings).toBeTruthy();
       expect(schema.changed_files).toBeTruthy();
       expect(schema.no_files_changed).toBeTruthy();
-      expect(schema.verdict?.type).toBe('string');
-      expect(schema.verdict?.enum).toEqual(['accepted', 'accepted_with_notes', 'rejected']);
-      expect(schema.verdict?.description).toMatch(/Review-state verdict only/);
-      expect(schema.verdict?.description).toMatch(/Omit for claimed-state finish/);
+      expect(schema.verdict).toBeUndefined();
       expect(schema.payload_ref?.description).toMatch(/top-level task_number and agent_id win/);
     }
+    expect(review.verdict?.type).toBe('string');
+    expect(review.verdict?.enum).toEqual(['accepted', 'accepted_with_notes', 'rejected']);
   });
 
   it('keeps compact next-work fields in the canonical contract', () => {

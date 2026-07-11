@@ -95,6 +95,42 @@ describe('task close service', () => {
     expect(content).toContain('governed_by: task_close:a2');
   });
 
+  it('rolls back SQLite closure when the task projection write fails', async () => {
+    writeTask(7084);
+    admitClose(7084);
+    const taskPath = join(tempDir, '.ai', 'do-not-open', 'tasks', '20260425-7084-service-close.md');
+    const before = readFileSync(taskPath, 'utf8');
+
+    const result = await closeTaskService({
+      taskNumber: '7084',
+      by: 'a2',
+      cwd: tempDir,
+      mode: 'operator_direct',
+      projectionWriter: async () => {
+        throw new Error('injected_projection_failure');
+      },
+    });
+
+    expect(result.exitCode).toBe(ExitCode.GENERAL_ERROR);
+    expect(result.result).toMatchObject({
+      status: 'error',
+      error: 'close_projection_transaction_failed',
+      transaction_rollback: 'attempted',
+      projection_restored: true,
+    });
+    expect(readFileSync(taskPath, 'utf8')).toBe(before);
+
+    const store = openTaskLifecycleStore(tempDir);
+    try {
+      expect(store.getLifecycleByNumber(7084)?.status).toBe('in_review');
+      expect(store.getLifecycleByNumber(7084)?.closed_at).toBeNull();
+      expect(store.getLifecycleByNumber(7084)?.closed_by).toBeNull();
+      expect(store.getLifecycleByNumber(7084)?.closure_mode).toBeNull();
+    } finally {
+      store.db.close();
+    }
+  });
+
   it('blocks lifecycle close without evidence admission', async () => {
     writeTask(7082);
 

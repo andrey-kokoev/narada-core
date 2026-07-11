@@ -118,6 +118,78 @@ describe('task review service', () => {
     }
   });
 
+  it('can admit review outcome without writing legacy review row when dependency exists', async () => {
+    await moveToReview(tempDir);
+    const store = openTaskLifecycleStore(tempDir);
+    try {
+      store.upsertLifecycle({
+        task_id: '20260420-1000-review-task',
+        task_number: 1000,
+        status: 'opened',
+        governed_by: 'review',
+        closed_at: null,
+        closed_by: null,
+        closure_mode: null,
+        reopened_at: null,
+        reopened_by: null,
+        continuation_packet_json: null,
+        updated_at: '2026-01-01T00:00:00Z',
+      });
+      store.upsertTaskDependency({
+        dependency_id: 'dep-review-999-1000',
+        parent_task_id: '20260420-999-test-task',
+        required_task_id: '20260420-1000-review-task',
+        kind: 'review',
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        status: 'open',
+        created_by: 'worker',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+      store.upsertTaskOutcomeContract({
+        contract_id: 'contract-review-1000',
+        task_id: '20260420-1000-review-task',
+        outcome_type: 'review',
+        allowed_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes', 'rejected']),
+        satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+        blocking_outcomes_json: JSON.stringify(['rejected']),
+        required_fields_json: JSON.stringify(['summary']),
+        capability_requirement: 'review',
+        created_by: 'worker',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+    } finally {
+      store.db.close();
+    }
+
+    const result = await reviewTaskService({
+      taskNumber: '999',
+      agent: 'reviewer',
+      verdict: 'accepted',
+      cwd: tempDir,
+      suppressLegacyReviewRow: true,
+    });
+
+    expect(result.exitCode).toBe(ExitCode.SUCCESS);
+    expect(result.result).toMatchObject({
+      status: 'success',
+      verdict: 'accepted',
+      new_status: 'closed',
+      close_action: 'closed',
+      legacy_review_row_suppressed: true,
+    });
+    expect(result.result.review_id).toBeUndefined();
+    expect(result.result.task_outcome?.outcome).toBe('accepted');
+
+    const verifyStore = openTaskLifecycleStore(tempDir);
+    try {
+      expect(verifyStore.listReviews('20260420-999-test-task')).toEqual([]);
+      expect(verifyStore.getLatestTaskOutcome('20260420-1000-review-task')?.outcome).toBe('accepted');
+      expect(verifyStore.getLifecycle('20260420-999-test-task')?.status).toBe('closed');
+    } finally {
+      verifyStore.db.close();
+    }
+  });
+
   it('reopens a rejected task', async () => {
     await moveToReview(tempDir);
 

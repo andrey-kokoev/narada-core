@@ -316,6 +316,7 @@ describe('SqliteTaskLifecycleStore', () => {
       assignment_id: 'assign-1',
       task_id: 'task-562',
       agent_id: 'agent-a',
+      agent_identity_ref_json: null,
       claimed_at: '2026-04-24T12:00:00.000Z',
       released_at: null,
       release_reason: null,
@@ -330,6 +331,20 @@ describe('SqliteTaskLifecycleStore', () => {
       store.insertAssignment(assignment);
       const active = store.getActiveAssignment('task-562');
       expect(active).toEqual(assignment);
+    });
+
+    it('preserves structured identity refs while retaining legacy assignment agent_id', () => {
+      const agentIdentityRef = JSON.stringify({
+        schema: 'narada.agent_identity_ref.v2',
+        identity_scope: { kind: 'narada_site', site_id: 'smart-scheduling' },
+        local_agent_id: 'resident',
+        canonical_agent_id: 'smart-scheduling.resident',
+      });
+      store.insertAssignment({ ...assignment, agent_id: 'resident', agent_identity_ref_json: agentIdentityRef });
+
+      const active = store.getActiveAssignment('task-562');
+      expect(active?.agent_id).toBe('resident');
+      expect(active?.agent_identity_ref_json).toBe(agentIdentityRef);
     });
 
     it('returns undefined when no active assignment', () => {
@@ -566,6 +581,7 @@ describe('SqliteTaskLifecycleStore', () => {
       report_id: 'report-1',
       task_id: 'task-562',
       agent_id: 'agent-a',
+      agent_identity_ref_json: null,
       summary: 'Implemented the store',
       changed_files_json: JSON.stringify(['task-lifecycle-store.ts']),
       verification_json: null,
@@ -581,6 +597,28 @@ describe('SqliteTaskLifecycleStore', () => {
       const reports = store.listReports('task-562');
       expect(reports.length).toBe(1);
       expect(reports[0]!.summary).toBe('Implemented the store');
+    });
+
+    it('preserves structured identity refs on report rows and report records', () => {
+      const agentIdentityRef = JSON.stringify({
+        schema: 'narada.agent_identity_ref.v2',
+        identity_scope: { kind: 'narada_site', site_id: 'sonar' },
+        local_agent_id: 'resident',
+        canonical_agent_id: 'sonar.resident',
+      });
+      store.insertReport({ ...report, agent_identity_ref_json: agentIdentityRef });
+      store.upsertReportRecord({
+        report_id: 'record-1',
+        task_id: 'task-562',
+        assignment_id: 'assign-1',
+        agent_id: 'resident',
+        agent_identity_ref_json: agentIdentityRef,
+        reported_at: '2026-04-24T14:00:00.000Z',
+        report_json: '{}',
+      });
+
+      expect(store.listReports('task-562')[0]!.agent_identity_ref_json).toBe(agentIdentityRef);
+      expect(store.getReportRecord('record-1')!.agent_identity_ref_json).toBe(agentIdentityRef);
     });
 
     it('returns empty array when no reports', () => {
@@ -615,6 +653,7 @@ describe('SqliteTaskLifecycleStore', () => {
         .prepare('pragma table_info(task_reports)')
         .all() as Array<{ name?: string }>;
       expect(columns.some((column) => column.name === 'directive_id')).toBe(true);
+      expect(columns.some((column) => column.name === 'agent_identity_ref_json')).toBe(true);
       expect(store.listReports('task-562')[0]!.directive_id).toBe('dir_123');
     });
   });

@@ -38,6 +38,7 @@ import {
   type RunnableTask,
   type TaskContinuationAffinity,
 } from './task-governance.js';
+import { evaluateTaskDependencySatisfaction } from './task-dependency-satisfaction.js';
 import { hasMaterialSection } from './task-spec.js';
 import { analyzePrototypeClosure } from './prototype-closure.js';
 
@@ -176,6 +177,10 @@ export async function inspectTaskEvidenceWithProjection(
   const activeAssignment = assignments.find((a) => a.released_at === null);
   const reports = lifecycleStore.listReports(taskFile.taskId);
   const reviews = lifecycleStore.listReviews(taskFile.taskId);
+  const dependencySatisfaction = evaluateTaskDependencySatisfaction(lifecycleStore, taskFile.taskId);
+  const satisfiedReviewDependency = dependencySatisfaction.dependencies.some(
+    (dependency) => dependency.dependency_kind === 'review' && dependency.satisfied,
+  );
 
   const hasReport = reports.length > 0;
   const hasReportVerification = reports.some((report) => {
@@ -187,10 +192,10 @@ export async function inspectTaskEvidenceWithProjection(
   });
   const hasGovernedVerificationRuns = lifecycleStore.hasVerificationRunsForTask(taskFile.taskId);
   const hasVerification = hasMarkdownVerification || hasGovernedVerificationRuns || hasReportVerification;
-  const hasReview = reviews.length > 0;
+  const hasReview = reviews.length > 0 || satisfiedReviewDependency;
   const hasAcceptedReview = reviews.some(
     (r) => r.verdict === 'accepted',
-  );
+  ) || satisfiedReviewDependency;
 
   // Closure is authoritative from SQLite lifecycle row
   const hasClosure = lifecycle.closed_at !== null;

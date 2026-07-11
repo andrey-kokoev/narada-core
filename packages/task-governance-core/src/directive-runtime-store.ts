@@ -280,6 +280,18 @@ export class SqliteDirectiveRuntimeStore {
     const clauses = [
       `admission_status = 'admitted'`,
       `delivery_status in ('pending', 'failed')`,
+      `(
+        delivery_status != 'failed'
+        or (
+          coalesce(json_extract(directive_json, '$.delivery.failure_reason'), '') not in (
+            'lease_expired_without_carrier_receipt',
+            'delivery_without_receipt_past_threshold',
+            'delivery_stale'
+          )
+          and coalesce(json_extract(directive_json, '$.delivery.failure_reason'), '') not like 'terminal_outcome_%'
+          and coalesce(json_extract(directive_json, '$.delivery.failure_reason'), '') not like 'operator_paused_%'
+        )
+      )`,
       `(not_before is null or not_before <= ?)`,
       `(expires_at is null or expires_at > ?)`,
     ];

@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { taskAgentIdentityRefJson } from './agent-identity-ref.js';
 import {
   findTaskFile,
   extractTaskNumberFromFileName,
@@ -164,6 +165,7 @@ export async function claimTaskService(
         assignment_id: admission.intent.assignment_id ?? `assign-${taskFile.taskId}-${agentId}-${Date.now()}`,
         task_id: taskFile.taskId,
         agent_id: agentId,
+        agent_identity_ref_json: taskAgentIdentityRefJson(agentId),
         claimed_at: now,
         released_at: null,
         release_reason: null,
@@ -330,6 +332,7 @@ export async function continueTaskService(
         assignment_id: admission.intent.assignment_id ?? `assign-${taskFile.taskId}-${agentId}-${Date.now()}`,
         task_id: taskFile.taskId,
         agent_id: agentId,
+        agent_identity_ref_json: taskAgentIdentityRefJson(agentId),
         claimed_at: now,
         released_at: null,
         release_reason: null,

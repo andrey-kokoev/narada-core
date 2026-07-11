@@ -71,6 +71,10 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       limit: numberSchema('Maximum results; defaults to 50.'),
     })),
     tool('task_lifecycle_show', 'Show full task details: lifecycle, spec, assignment, and observations.', objectSchema({ task_number: numberSchema('Task number to inspect.') }, ['task_number'])),
+    tool('task_lifecycle_diagnose_task_ref', 'Diagnose task_id/task_number collisions, missing projections, and unsafe directive references before report or closeout.', objectSchema({
+      task_id: stringSchema('Optional lifecycle task_id to diagnose.'),
+      task_number: numberSchema('Optional task number to compare against task_id.'),
+    })),
     tool('task_lifecycle_roster', 'List the agent roster.', objectSchema({})),
     tool('task_lifecycle_roster_admit', 'Append an admitted roster identity event and project it into the agent_roster read model.', objectSchema({
       agent_id: stringSchema('Canonical agent identity to admit into task lifecycle roster authority.'),
@@ -97,7 +101,7 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       agent_id: stringSchema('Optional agent_id guard; must match current claimant.'),
       reason: stringSchema('Release reason.'),
     }, ['task_number'])),
-    tool('task_lifecycle_next', 'Get the next recommended action for an agent: active work, review obligations, or claimable tasks.', objectSchema({
+    tool('task_lifecycle_next', 'Get the next recommended action for an agent: active work, dependency obligations, or claimable tasks.', objectSchema({
       agent_id: stringSchema('Agent id to query workboard for.'),
       limit: numberSchema('Maximum results per category; defaults to 8.'),
       last_workboard_check_at: stringSchema("ISO timestamp of the agent's last workboard check. Enables state_freshness computation."),
@@ -110,12 +114,13 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       last_workboard_check_at: stringSchema("ISO timestamp of the agent's last workboard check. Enables freshness evidence."),
       previous_snapshot: { type: 'object', description: 'Optional prior snapshot payload for drift comparison.', additionalProperties: true },
     }, ['agent_id'])),
-    tool('task_lifecycle_obligations', 'List directed obligations for an agent (review requests, etc.).', objectSchema({
+    tool('task_lifecycle_obligations', 'List directed obligations and ordinary dependency work for an agent.', objectSchema({
       agent_id: stringSchema('Agent id to query obligations for.'),
       status: stringSchema('Filter by status: open, completed, rejected. Defaults to open.'),
+      limit: numberSchema('Maximum dependency work items to include; defaults to 50.'),
     }, ['agent_id'])),
     tool('task_lifecycle_inspect', 'Deep-inspect a task: lifecycle state, evidence summary, assignment, obligations, and reports.', objectSchema({ task_number: numberSchema('Task number to inspect.') }, ['task_number'])),
-    tool('task_lifecycle_evidence_preflight', 'Report finish/admission requirements and exact remediation before closeout. Does not mutate task state.', objectSchema({ task_number: numberSchema('Task number to check before finish.') }, ['task_number'])),
+    tool('task_lifecycle_evidence_preflight', 'Report finish/admission requirements and exact remediation before closeout. Does not mutate task state.', objectSchema({ task_number: numberSchema('Task number to check before finish.'), include_unrelated_changed_files: booleanSchema('If true, include all git-changed files under the site root in the changed-file evidence summary. Default false scopes to task-relevant paths.') }, ['task_number'])),
     tool('task_lifecycle_self_certification_preflight', 'Validate self-certification guard metadata for task/CAPA/evidence/chapter/final-summary surfaces without mutating authority state.', objectSchema({
       self_certification: { type: 'object', description: 'Self-certification guard packet. Fields include target_category, subject_principal, actor_principal, requires_independent_review, reviewer_eligibility_ref, independent_review_ref, operator_acceptance_ref, misleading_completion_answer, allowed_pending_state, closure_state.', additionalProperties: true },
       surface: stringSchema('Surface being checked, e.g. task_lifecycle_finish, task_lifecycle_review, task_lifecycle_close, evidence_admission, capa_closeout, operator_final_summary.'),
@@ -139,8 +144,8 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       since: stringSchema('ISO timestamp start. Defaults to 24 hours ago.'),
       until: stringSchema('ISO timestamp end. Defaults to now.'),
     })),
-    tool('task_lifecycle_submit_report', 'Readable alias for task_lifecycle_finish. For claimed tasks, submit a finish report without verdict using summary plus changed_files or no_files_changed. Review verdicts belong on task_lifecycle_review. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.', finishSchema()),
-    tool('task_lifecycle_finish', 'Finish a claimed task by submitting a report without verdict using summary plus changed_files or no_files_changed. Review verdicts belong on task_lifecycle_review. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.', finishSchema()),
+    tool('task_lifecycle_submit_report', 'Readable alias for task_lifecycle_finish. Finish a claimed task by submitting a report. If the task has an outcome contract, include outcome and optional findings; contract_id is inferred from the task. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.', finishSchema()),
+    tool('task_lifecycle_finish', 'Finish a claimed task by submitting a report. If the task has an outcome contract, include outcome and optional findings; contract_id is inferred from the task. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.', finishSchema()),
     tool('task_lifecycle_close', 'Close a task. Requires the task to be in a closable state.', objectSchema({
       task_number: numberSchema('Task number to close.'),
       agent_id: stringSchema('Agent id closing the task.'),
@@ -148,6 +153,17 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       no_continuation_needed: stringSchema('Rationale for closing without a continuation task (for design-only/spike tasks).'),
       self_certification: { type: 'object', description: 'Optional self-certification guard packet for architect-failure/deception/trust closeout.', additionalProperties: true },
     }, ['task_number', 'agent_id'])),
+    tool('task_lifecycle_dependency_disposition_record', 'Record explicit disposition for a blocking dependency outcome. Use after dependency satisfaction reports disposition_required=true; required_outcome_id is inferred from the latest outcome when omitted.', objectSchema({
+      dependency_id: stringSchema('Dependency id whose blocking outcome is being dispositioned.'),
+      agent_id: stringSchema('Agent id recording the disposition.'),
+      kind: stringSchema('Disposition kind: remediation_task, covered_by_existing_task, routed_obligation, operator_decision_required, operator_deferred, or out_of_scope_or_rejected.'),
+      summary: stringSchema('Concise disposition summary and authority rationale.'),
+      required_outcome_id: stringSchema('Optional specific task_outcomes.outcome_id. Defaults to latest outcome on the required task.'),
+      status: stringSchema('Disposition status. Defaults to open, or deferred for operator_deferred/out_of_scope_or_rejected.'),
+      target_task_id: stringSchema('Optional task_id for remediation_task or covered_by_existing_task disposition.'),
+      routed_obligation_id: stringSchema('Optional directed obligation id for routed_obligation disposition.'),
+      authority_basis: authorityBasisSchema('Required authority basis for operator_deferred and out_of_scope_or_rejected dispositions; optional otherwise.'),
+    }, ['dependency_id', 'agent_id', 'kind', 'summary'])),
     tool('task_lifecycle_search', 'Search tasks by title or content.', objectSchema({
       query: stringSchema('Search query string.'),
       status: stringSchema('Optional status filter.'),
@@ -157,7 +173,7 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       task_number: numberSchema('Task number to find related tasks for.'),
       limit: numberSchema('Maximum results; defaults to 8.'),
     }, ['task_number'])),
-    tool('task_lifecycle_defer', 'Defer a task. Only valid from opened or in_review status.', objectSchema({
+    tool('task_lifecycle_defer', 'Defer a task. Valid for open work and compatibility review/dependency wait states.', objectSchema({
       task_number: numberSchema('Task number to defer.'),
       agent_id: stringSchema('Agent id deferring the task.'),
       reason: stringSchema('Optional reason for deferral.'),
@@ -173,12 +189,13 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       agent_id: stringSchema('Agent id reopening the task.'),
       reason: stringSchema('Optional reason for reopening.'),
     }, ['task_number', 'agent_id'])),
-    tool('task_lifecycle_review', 'Review a task in_review: accept, accept_with_notes, or reject. Response includes close_blocked when evidence admission blocks closure despite accepted review.', objectSchema({
-      task_number: numberSchema('Task number to review.'),
-      agent_id: stringSchema('Reviewer agent id.'),
-      verdict: enumStringSchema(['accepted', 'accepted_with_notes', 'rejected'], 'Verdict: accepted, accepted_with_notes, rejected.'),
+    tool('task_lifecycle_review', 'Compatibility migration tool for legacy review calls. Normal review work should be a review-contract dependency task finished with task_lifecycle_finish. This tool preserves old review-row readback while admitting dependency/outcome authority.', objectSchema({
+      task_number: numberSchema('Legacy parent task number being reviewed.'),
+      agent_id: stringSchema('Reviewer agent id for compatibility migration.'),
+      verdict: enumStringSchema(['accepted', 'accepted_with_notes', 'rejected'], 'Legacy verdict mapped to a review outcome: accepted, accepted_with_notes, rejected.'),
       findings: { type: 'array', description: 'Array of finding objects: {severity, description, location?}' },
       single_operator_review: booleanSchema('Set to true to allow and annotate a same-operator review (reviewer and finisher share operator_identity).'),
+      auto_accept_single_operator: booleanSchema('Set to true to automatically accept and annotate a same-operator or singleton-role review in one call.'),
       self_certification: { type: 'object', description: 'Optional self-certification guard packet for architect-failure/deception/trust review.', additionalProperties: true },
     }, ['task_number', 'agent_id', 'verdict'])),
     tool('task_lifecycle_record_observation', 'Readable alias for task_lifecycle_submit_observation. Writes a structured observation artifact; observation artifacts are context and do not satisfy verification gates by themselves.', submitObservationSchema()),
@@ -302,6 +319,7 @@ function dispositionCloseoutSchema(): JsonSchema {
     finish: booleanSchema('Finish the task after writing/proving. Default false.'),
     changed_files: arraySchema(stringSchema('Repo-relative changed file path.'), 'Explicit changed-file evidence for the optional finish report.'),
     no_files_changed: booleanSchema('Explicitly declare that the optional finish legitimately changed no files.'),
+    include_unrelated_changed_files: booleanSchema('If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths.'),
   }, ['task_number', 'agent_id']);
 }
 
@@ -311,13 +329,17 @@ function finishSchema(): JsonSchema {
     agent_id: stringSchema('Agent id finishing the task.'),
     summary: stringSchema('Finish summary.'),
     directive_id: stringSchema('Optional first-class directive id that caused this report. Prefer this structured field over summary tokens.'),
-    verdict: enumStringSchema(['accepted', 'accepted_with_notes', 'rejected'], 'Review-state verdict only: accepted, accepted_with_notes, or rejected. Omit for claimed-state finish/report submission; claimed tasks should use summary plus changed_files or no_files_changed.'),
-    reviewer: stringSchema('Optional admitted reviewer agent id or unique reviewer role alias for the generated review obligation.'),
+    outcome: stringSchema('Structured outcome for tasks with an outcome contract. Allowed values are inferred from the task contract, for example accepted, accepted_with_notes, rejected, completed, or blocked.'),
+    findings: arraySchema({ type: 'object', additionalProperties: true }, 'Structured findings for outcome-contract tasks. Use [] when there are no findings.'),
+    evidence_refs: arraySchema(stringSchema('Evidence reference.'), 'Optional evidence references supporting the structured outcome.'),
+    reviewer: stringSchema('Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing.'),
     changed_files: arraySchema(stringSchema('Repo-relative changed file path.'), 'Explicit changed-file evidence for this finish report.'),
     no_files_changed: booleanSchema('Explicitly declare that this finish legitimately changed no files.'),
+    include_unrelated_changed_files: booleanSchema('If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths.'),
+    authority_basis: authorityBasisSchema('Required when conflict-of-interest policy allows explicit operator override for an outcome-contract dependency task.'),
     recovery_truthfulness: { type: 'object', description: 'Required for serious-failure recovery finish/report claims. Fields: known_facts, inferences, uncertainty, changed, not_changed, remaining_work, evidence_limits, capa_open_status, state. terminal_corrected additionally requires repository_durability / commit-push state plus no open residual work.', additionalProperties: true },
     self_certification: { type: 'object', description: 'Required for architect-failure/deception/trust same-subject terminal correction claims. Fields: target_category, subject_principal, requires_independent_review, misleading_completion_answer, allowed_pending_state, plus independent_review_ref/reviewer_eligibility_ref or operator_acceptance_ref for terminal same-subject correction.', additionalProperties: true },
-    payload_ref: stringSchema('Optional immutable payload ref carrying long finish/report companion fields such as summary, changed_files, recovery_truthfulness, or self_certification. Payload fields are merged with top-level arguments; top-level task_number and agent_id win.'),
+    payload_ref: stringSchema('Optional immutable payload ref carrying long finish/report companion fields such as summary, changed_files, outcome, findings, recovery_truthfulness, or self_certification. Payload fields are merged with top-level arguments; top-level task_number and agent_id win.'),
   }, ['task_number', 'agent_id']);
 }
 

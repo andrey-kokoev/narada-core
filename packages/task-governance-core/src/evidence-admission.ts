@@ -7,6 +7,7 @@ import {
   type TaskLifecycleStore,
   type TaskStatus,
 } from './task-lifecycle-store.js';
+import { evaluateTaskDependencySatisfaction } from './task-dependency-satisfaction.js';
 
 export type EvidenceAdmissionMethod =
   | 'inspection'
@@ -88,6 +89,9 @@ export async function admitTaskEvidence(options: {
     const latestReviewVerdict = latestReview?.verdict ?? null;
     const acceptedReview = latestReviewVerdict === 'accepted';
     const rejectedReview = latestReviewVerdict === 'needs_changes' || latestReviewVerdict === 'rejected';
+    const dependencySatisfaction = evaluateTaskDependencySatisfaction(store, taskId);
+    const hasDependencyGate = dependencySatisfaction.dependency_count > 0;
+    const dependencyGateSatisfied = hasDependencyGate && dependencySatisfaction.all_satisfied;
     const historicalRejectedReviewIds = reviews
       .slice(1)
       .filter((review) => review.verdict === 'needs_changes' || review.verdict === 'rejected')
@@ -142,8 +146,10 @@ export async function admitTaskEvidence(options: {
     if (evidence.violations.includes('terminal_with_derivative_files')) {
       blockers.push('Derivative task-status files exist');
     }
-    if (options.requireReview && !acceptedReview) {
-      blockers.push('Review-gated admission requires accepted review');
+    if (options.requireReview && !dependencyGateSatisfied && !acceptedReview) {
+      blockers.push(hasDependencyGate
+        ? 'Review-gated admission requires satisfied dependency outcomes'
+        : 'Review-gated admission requires accepted review');
     }
     if (rejectedReview && options.methods.includes('review')) {
       blockers.push('Latest review rejected admission');
@@ -168,6 +174,7 @@ export async function admitTaskEvidence(options: {
         latest_review_id: latestReview?.review_id ?? null,
         latest_review_verdict: latestReviewVerdict,
         historical_rejected_review_ids: historicalRejectedReviewIds,
+        dependency_satisfaction: dependencySatisfaction,
         observation_output_counted: false,
       }),
     };

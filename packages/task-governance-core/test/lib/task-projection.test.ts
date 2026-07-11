@@ -278,6 +278,83 @@ describe('task projection layer', () => {
     db.close();
   });
 
+  it('uses satisfied review dependency outcomes as review evidence', async () => {
+    writeFileSync(
+      join(tempDir, '.ai', 'do-not-open', 'tasks', '20260420-109-test.md'),
+      `---\ntask_id: 109\nstatus: in_review\n---\n\n# Task 109: Test\n\n## Acceptance Criteria\n- [x] Do thing A\n- [x] Do thing B\n\n## Execution Notes\nDone.\n\n## Verification\nOK.\n`,
+    );
+
+    const db = new Database(':memory:');
+    const store = new SqliteTaskLifecycleStore({ db });
+    store.initSchema();
+
+    store.upsertLifecycle({
+      task_id: '20260420-109-test',
+      task_number: 109,
+      status: 'in_review',
+      governed_by: null,
+      closed_at: null,
+      closed_by: null,
+      reopened_at: null,
+      reopened_by: null,
+      continuation_packet_json: null,
+      updated_at: new Date().toISOString(),
+    });
+    store.upsertLifecycle({
+      task_id: '20260420-110-review-test',
+      task_number: 110,
+      status: 'closed',
+      governed_by: 'review',
+      closed_at: new Date().toISOString(),
+      closed_by: 'reviewer-a',
+      closure_mode: 'peer_reviewed',
+      reopened_at: null,
+      reopened_by: null,
+      continuation_packet_json: null,
+      updated_at: new Date().toISOString(),
+    });
+    store.upsertTaskDependency({
+      dependency_id: 'dep-review-109-110',
+      parent_task_id: '20260420-109-test',
+      required_task_id: '20260420-110-review-test',
+      kind: 'review',
+      satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+      status: 'open',
+      created_by: 'agent-a',
+      created_at: new Date().toISOString(),
+    });
+    store.upsertTaskOutcomeContract({
+      contract_id: 'contract-review-110',
+      task_id: '20260420-110-review-test',
+      outcome_type: 'review',
+      allowed_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes', 'rejected']),
+      satisfying_outcomes_json: JSON.stringify(['accepted', 'accepted_with_notes']),
+      blocking_outcomes_json: JSON.stringify(['rejected']),
+      required_fields_json: JSON.stringify(['summary']),
+      capability_requirement: 'review',
+      created_by: 'agent-a',
+      created_at: new Date().toISOString(),
+    });
+    store.insertTaskOutcome({
+      outcome_id: 'outcome-review-110',
+      task_id: '20260420-110-review-test',
+      contract_id: 'contract-review-110',
+      agent_id: 'reviewer-a',
+      outcome: 'accepted',
+      summary: 'Accepted by dependency outcome.',
+      findings_json: JSON.stringify([]),
+      evidence_refs_json: JSON.stringify([]),
+      admitted_at: new Date().toISOString(),
+    });
+    expect(store.listReviews('20260420-109-test')).toEqual([]);
+
+    const result = await inspectTaskEvidenceWithProjection(tempDir, '109', store);
+    expect(result).not.toBeNull();
+    expect(result!.has_review).toBe(true);
+    expect(result!.verdict).toBe('needs_closure');
+    db.close();
+  });
+
   it('uses active assignment from SQLite', async () => {
     createTask(tempDir, 106, 'claimed');
 

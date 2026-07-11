@@ -9,10 +9,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
   parseFrontMatter,
-  loadRoster,
   isExecutableTaskFile,
   resolveExecutableTaskNumberOwnership,
-  type TaskFrontMatter,
 } from './task-governance.js';
 import { openTaskLifecycleStore } from './task-lifecycle-store.js';
 
@@ -64,9 +62,13 @@ export async function readTaskGraph(options: ReadTaskGraphOptions): Promise<Task
   const dir = join(cwd, TASKS_DIR);
   const files = await readdir(dir).catch(() => [] as string[]);
   const mdFiles = files.filter((f) => f.endsWith('.md'));
+  if (mdFiles.length === 0) {
+    return { nodes: [], edges: [] };
+  }
   const store = openTaskLifecycleStore(cwd);
   const ownership = await resolveExecutableTaskNumberOwnership(cwd, store);
   const specByNumber = new Map<number, { title: string; dependencies: number[] }>();
+  const assignedByTaskNumber = new Map<number, string>();
   try {
     const rows = store.db
       .prepare('select task_number, title, dependencies_json from task_specs')
@@ -76,6 +78,24 @@ export async function readTaskGraph(options: ReadTaskGraphOptions): Promise<Task
         title: String(row.title),
         dependencies: JSON.parse(String(row.dependencies_json)) as number[],
       });
+    }
+    const assignmentRows = store.db
+      .prepare(`
+        select l.task_number, a.agent_id
+        from task_lifecycle l
+        join task_assignments a
+          on a.assignment_id = (
+            select assignment_id
+            from task_assignments
+            where task_id = l.task_id and released_at is null
+            order by claimed_at desc
+            limit 1
+          )
+        order by l.task_number asc
+      `)
+      .all() as Array<{ task_number: number; agent_id: string }>;
+    for (const row of assignmentRows) {
+      assignedByTaskNumber.set(Number(row.task_number), String(row.agent_id));
     }
   } finally {
     store.db.close();
@@ -104,7 +124,7 @@ export async function readTaskGraph(options: ReadTaskGraphOptions): Promise<Task
     }
 
     const spec = specByNumber.get(taskNumber);
-    const title = spec?.title ?? base;
+    const title = spec?.title ?? extractMarkdownTitle(body) ?? base;
 
     const dependsOn = spec?.dependencies ?? normalizeNumberArray(frontMatter.depends_on);
     const blockedBy = normalizeNumberArray(frontMatter.blocked_by);
@@ -122,20 +142,6 @@ export async function readTaskGraph(options: ReadTaskGraphOptions): Promise<Task
 
   // Sort by task number for stability
   entries.sort((a, b) => a.taskNumber - b.taskNumber);
-
-  // Load roster for assignment overlay
-  let assignedByTaskNumber: Map<number, string> | undefined;
-  try {
-    const roster = await loadRoster(cwd);
-    assignedByTaskNumber = new Map<number, string>();
-    for (const agent of roster.agents) {
-      if (agent.task != null) {
-        assignedByTaskNumber.set(agent.task, agent.agent_id);
-      }
-    }
-  } catch {
-    // Roster may not exist; proceed without assignments
-  }
 
   // Build full node list
   const allNodes: TaskGraphNode[] = entries.map((e) => ({
@@ -220,6 +226,11 @@ function normalizeNumberArray(value: unknown): number[] {
     return value.filter((v): v is number => typeof v === 'number');
   }
   return [];
+}
+
+function extractMarkdownTitle(body: string): string | null {
+  const heading = body.split(/\r?\n/).find((line) => line.startsWith('# '));
+  return heading ? heading.slice(2).trim() || null : null;
 }
 
 /**
