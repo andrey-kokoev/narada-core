@@ -10,6 +10,7 @@ export * as taskAllocateService from './task-allocate-service.js';
 export * as taskAssignmentLifecycleService from './task-assignment-lifecycle-service.js';
 export * as taskSearchService from './task-search-service.js';
 export * as taskGraph from './task-graph.js';
+export * as taskDependencySatisfaction from './task-dependency-satisfaction.js';
 export * as taskLifecycleStore from './task-lifecycle-store.js';
 export * as directiveRuntimeStore from './directive-runtime-store.js';
 export * as taskProjection from './task-projection.js';
