@@ -42,7 +42,7 @@ describe('task lifecycle MCP contract', () => {
     expect(normalizeTaskLifecycleToolName('task_lifecycle_finish')).toBe('task_lifecycle_finish');
   });
 
-  it('exposes long-payload recovery and review-state fields on finish', () => {
+  it('exposes finish fields and keeps review-state fields on review', () => {
     const tools = new Map(taskLifecycleDomainTools().map((tool) => [tool.name, tool]));
     const finish = tools.get('task_lifecycle_finish')?.inputSchema.properties ?? {};
     const submitReport = tools.get('task_lifecycle_submit_report')?.inputSchema.properties ?? {};
@@ -56,9 +56,7 @@ describe('task lifecycle MCP contract', () => {
       expect(schema.findings).toBeTruthy();
       expect(schema.changed_files).toBeTruthy();
       expect(schema.no_files_changed).toBeTruthy();
-      expect(schema.verdict?.type).toBe('string');
-      expect(schema.verdict?.enum).toEqual(['accepted', 'accepted_with_notes', 'rejected']);
-      expect(schema.verdict?.description).toMatch(/Review-state verdict only/);
+      expect(schema.verdict).toBeUndefined();
       expect(schema.payload_ref?.description).toMatch(/top-level task_number and agent_id win/);
     }
     expect(review.verdict?.type).toBe('string');

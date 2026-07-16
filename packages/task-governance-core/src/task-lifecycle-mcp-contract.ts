@@ -333,7 +333,6 @@ function finishSchema(): JsonSchema {
     findings: arraySchema({ type: 'object', additionalProperties: true }, 'Structured findings for outcome-contract tasks. Use [] when there are no findings.'),
     evidence_refs: arraySchema(stringSchema('Evidence reference.'), 'Optional evidence references supporting the structured outcome.'),
     reviewer: stringSchema('Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing.'),
-    verdict: enumStringSchema(['accepted', 'accepted_with_notes', 'rejected'], 'Review-state verdict only. Omit for claimed-state finish/report submission; claimed tasks should use summary plus changed_files or no_files_changed.'),
     changed_files: arraySchema(stringSchema('Repo-relative changed file path.'), 'Explicit changed-file evidence for this finish report.'),
     no_files_changed: booleanSchema('Explicitly declare that this finish legitimately changed no files.'),
     include_unrelated_changed_files: booleanSchema('If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths.'),
