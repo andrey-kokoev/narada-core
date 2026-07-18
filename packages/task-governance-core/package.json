@@ -30,6 +30,7 @@
     "./task-projection": { "types": "./dist/task-projection.d.ts", "import": "./dist/task-projection.js" },
     "./task-recommender": { "types": "./dist/task-recommender.d.ts", "import": "./dist/task-recommender.js" },
     "./task-spec": { "types": "./dist/task-spec.d.ts", "import": "./dist/task-spec.js" },
+    "./task-tags": { "types": "./dist/task-tags.d.ts", "import": "./dist/task-tags.js" },
     "./mutation-evidence": { "types": "./dist/mutation-evidence.d.ts", "import": "./dist/mutation-evidence.js" },
     "./sqlite-runtime": { "types": "./dist/sqlite-runtime.d.ts", "import": "./dist/sqlite-runtime.js" },
     "./sqlite-database": { "types": "./dist/sqlite-database.d.ts", "import": "./dist/sqlite-database.js" }

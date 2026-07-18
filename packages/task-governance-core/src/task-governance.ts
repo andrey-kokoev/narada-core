@@ -85,6 +85,7 @@ export interface TaskFrontMatter {
   task_id?: string | number;
   status?: string;
   depends_on?: number[];
+  tags?: string | string[];
   continuation_affinity?: TaskContinuationAffinity;
   /** Governed closure provenance — set exclusively by governed operators (task_close, task_review, chapter_close) */
   governed_by?: string;

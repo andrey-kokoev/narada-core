@@ -1,4 +1,5 @@
 import type { TaskFrontMatter } from './task-governance.js';
+import { parseTaskTagsValue } from './task-tags.js';
 
 export interface TaskSpecRecord {
   task_id: string;
@@ -11,6 +12,7 @@ export interface TaskSpecRecord {
   non_goals: string | null;
   acceptance_criteria: string[];
   dependencies: number[];
+  tags: string[];
   updated_at: string;
 }
 
@@ -96,6 +98,12 @@ export function parseTaskSpecFromMarkdown(args: {
         .map((value) => Number(value))
         .filter((value) => Number.isFinite(value))
     : [];
+  let tags: string[] = [];
+  try {
+    tags = parseTaskTagsValue(frontMatter.tags);
+  } catch {
+    // A malformed legacy frontmatter label must not make the task unreadable.
+  }
 
   return {
     task_id: taskId,
@@ -108,6 +116,7 @@ export function parseTaskSpecFromMarkdown(args: {
     non_goals: extractSection(body, 'Non-Goals'),
     acceptance_criteria: acceptanceCriteria,
     dependencies: dependsOn,
+    tags,
     updated_at: new Date().toISOString(),
   };
 }

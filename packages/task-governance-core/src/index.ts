@@ -19,3 +19,4 @@ export * as taskSpec from './task-spec.js';
 export * as mutationEvidence from './mutation-evidence.js';
 export * as sqliteRuntime from './sqlite-runtime.js';
 export * as taskLifecycleMcpContract from './task-lifecycle-mcp-contract.js';
+export * as taskTags from './task-tags.js';

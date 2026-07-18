@@ -50,6 +50,7 @@ export const TASK_LIFECYCLE_TOOL_ALIASES: Record<string, string> = {
   task_mcp_inbox_target: 'task_lifecycle_inbox_target',
   task_mcp_create: 'task_lifecycle_create',
   task_mcp_set_routing: 'task_lifecycle_set_routing',
+  task_mcp_tags_update: 'task_lifecycle_tags_update',
   task_mcp_test_tool: 'task_lifecycle_test_mcp_tool',
   task_mcp_run_tests: 'task_lifecycle_run_tests',
 };
@@ -65,11 +66,19 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       mode: stringSchema('request, status, acknowledge, or clear. Default request.'),
       reason: stringSchema('Optional reason for the restart request or acknowledgement.'),
     })),
-    tool('task_lifecycle_list', 'List tasks with optional status and agent filters.', objectSchema({
+    tool('task_lifecycle_list', 'List site-local tasks with optional status, agent, and tag filters. Tags are descriptive labels only and do not change routing or authorization.', objectSchema({
       status: stringSchema('Filter by status: draft, opened, claimed, in_review, closed, confirmed, etc.'),
       agent_id: stringSchema('Filter by assigned agent_id.'),
+      tags: arraySchema(stringSchema('Normalized task tag.'), 'Filter by one or more site-local tags.'),
+      tag_match: enumStringSchema(['any', 'all'], 'When tags are provided, match any or all tags. Defaults to all.'),
       limit: numberSchema('Maximum results; defaults to 50.'),
     })),
+    tool('task_lifecycle_tags_update', 'Replace the complete site-local tag set for a task. The change is audited with before/after tags, actor, reason, and timestamp; tags never affect routing, priority, dependencies, review, closure, or authorization.', objectSchema({
+      task_number: numberSchema('Task number whose tags should be replaced.'),
+      agent_id: stringSchema('Agent id performing the tag update.'),
+      tags: arraySchema(stringSchema('Normalized lowercase kebab-case tag.'), 'Complete replacement tag set. Use [] to clear all tags.'),
+      reason: stringSchema('Concise reason for the tag replacement; recorded in the audit event.'),
+    }, ['task_number', 'agent_id', 'tags', 'reason'])),
     tool('task_lifecycle_show', 'Show full task details: lifecycle, spec, assignment, and observations.', objectSchema({ task_number: numberSchema('Task number to inspect.') }, ['task_number'])),
     tool('task_lifecycle_diagnose_task_ref', 'Diagnose task_id/task_number collisions, missing projections, and unsafe directive references before report or closeout.', objectSchema({
       task_id: stringSchema('Optional lifecycle task_id to diagnose.'),
@@ -169,7 +178,7 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       status: stringSchema('Optional status filter.'),
       limit: numberSchema('Maximum results; defaults to 20.'),
     }, ['query'])),
-    tool('task_lifecycle_related', 'Find tasks related to a given task by tag overlap. Returns semantically similar tasks based on shared terms extracted from title, goal, and context.', objectSchema({
+    tool('task_lifecycle_related', 'Find site-local tasks related to a given task. Explicit tag overlap is preferred; derived title/goal/context terms are used only as a fallback.', objectSchema({
       task_number: numberSchema('Task number to find related tasks for.'),
       limit: numberSchema('Maximum results; defaults to 8.'),
     }, ['task_number'])),
@@ -213,7 +222,7 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       agent_id: stringSchema('Agent id used as fallback disposition principal.'),
       reason: stringSchema('Disposition reason; required for dismiss.'),
     }, ['envelope_id'])),
-    tool('task_lifecycle_create', 'Create a new task from an immutable payload_ref carrying title, goal, context, required work, non-goals, acceptance criteria, and optional preferred/target roles.', objectSchema({
+    tool('task_lifecycle_create', 'Create a new task from an immutable payload_ref carrying title, goal, context, required work, non-goals, acceptance criteria, optional site-local tags, and optional preferred/target roles.', objectSchema({
       payload_ref: stringSchema('Required immutable transient payload ref such as mcp_payload:<id>@v1. Payload must contain the task definition.'),
     }, ['payload_ref'], { payloadRef: false })),
     ...recurringTools(),
@@ -259,6 +268,7 @@ function recurringTools(): TaskLifecycleTool[] {
       required_work: stringSchema('Required work markdown used for generated instances.'),
       non_goals: stringSchema('Non-goals markdown used for generated instances.'),
       acceptance_criteria: arraySchema(stringSchema('Acceptance criterion template.'), 'Acceptance criteria template for generated task instances.'),
+      tags: arraySchema(stringSchema('Normalized site-local tag.'), 'Tags copied to every generated task instance.'),
       evidence_requirements: arraySchema(stringSchema('Evidence requirement.'), 'Evidence expected from each generated run.'),
       target_role: stringSchema('Target role for generated task instances.'),
       preferred_role: stringSchema('Preferred role for generated task instances.'),

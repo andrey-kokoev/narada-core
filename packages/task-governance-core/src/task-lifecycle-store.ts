@@ -31,6 +31,7 @@ import {
   assertSqliteRuntimeSupported,
   selectSqliteRuntime,
 } from "./sqlite-runtime.js";
+import { normalizeTaskTags, parseStoredTaskTags } from './task-tags.js';
 
 type Db = Database;
 
@@ -314,7 +315,31 @@ export interface TaskSpecRow {
   non_goals_markdown?: string | null;
   acceptance_criteria_json?: string;
   dependencies_json?: string;
+  tags_json?: string | null;
   updated_at?: string;
+}
+
+export interface TaskTagUpdateRow {
+  update_id: string;
+  task_id: string;
+  task_number: number;
+  actor_agent_id: string;
+  previous_tags: string[];
+  tags: string[];
+  reason: string;
+  updated_at: string;
+}
+
+export interface TaskTagUpdateResult {
+  status: 'updated' | 'unchanged';
+  update_id: string | null;
+  task_id: string;
+  task_number: number;
+  actor_agent_id: string;
+  previous_tags: string[];
+  tags: string[];
+  reason: string;
+  updated_at: string;
 }
 
 export interface EnvelopeTaskMappingRow {
@@ -529,6 +554,16 @@ export interface TaskLifecycleStore {
   upsertTaskSpec(row: TaskSpecRow): void;
   getTaskSpec(taskId: string): TaskSpecRow | undefined;
   getTaskSpecByNumber(taskNumber: number): TaskSpecRow | undefined;
+  getAllTaskSpecs(): TaskSpecRow[];
+  replaceTaskTags(options: {
+    taskId: string;
+    tags: string[];
+    actorAgentId: string;
+    reason: string;
+    updateId: string;
+    updatedAt?: string;
+  }): TaskTagUpdateResult;
+  listTaskTagUpdates(taskId: string, limit?: number): TaskTagUpdateRow[];
   upsertEnvelopeTaskMapping(envelopeId: string, taskId: string, taskNumber: number, materializedAt: string): void;
   getTaskByEnvelopeId(envelopeId: string): EnvelopeTaskMappingRow | undefined;
   getEnvelopeMappingsByTaskId(taskId: string): EnvelopeTaskMappingRow[];
@@ -866,6 +901,20 @@ function rowToTaskSpec(row: Record<string, unknown>): TaskSpecRow {
     non_goals_markdown: row.non_goals_markdown ? String(row.non_goals_markdown) : null,
     acceptance_criteria_json: String(row.acceptance_criteria_json),
     dependencies_json: String(row.dependencies_json),
+    tags_json: typeof row.tags_json === 'string' ? row.tags_json : '[]',
+    updated_at: String(row.updated_at),
+  };
+}
+
+function rowToTaskTagUpdate(row: Record<string, unknown>): TaskTagUpdateRow {
+  return {
+    update_id: String(row.update_id),
+    task_id: String(row.task_id),
+    task_number: Number(row.task_number),
+    actor_agent_id: String(row.actor_agent_id),
+    previous_tags: parseStoredTaskTags(row.previous_tags_json),
+    tags: parseStoredTaskTags(row.new_tags_json),
+    reason: String(row.reason),
     updated_at: String(row.updated_at),
   };
 }
@@ -1043,6 +1092,7 @@ const REQUIRED_LIFECYCLE_TABLES = [
   'directed_obligations',
   'task_number_reservations',
   'task_specs',
+  'task_tag_updates',
   'envelope_task_mappings',
   'narada_andrey_task_role_preferences',
 ];
@@ -1115,6 +1165,22 @@ export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
     if (!hasCurrentLifecycleSchema(db)) {
       store.initSchema();
     }
+    ensureColumn(db, 'task_specs', 'tags_json', "text not null default '[]'");
+    db.exec(`
+      create table if not exists task_tag_updates (
+        update_id text primary key,
+        task_id text not null,
+        task_number integer not null,
+        actor_agent_id text not null,
+        previous_tags_json text not null,
+        new_tags_json text not null,
+        reason text not null,
+        updated_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+      create index if not exists idx_task_tag_updates_task
+        on task_tag_updates(task_id, updated_at desc);
+    `);
     ensureIdentityRefColumns(db);
     initializedLifecycleDbPaths.add(dbPath);
   }
@@ -1668,12 +1734,28 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
         non_goals_markdown text,
         acceptance_criteria_json text not null,
         dependencies_json text not null,
+        tags_json text not null default '[]',
         updated_at text not null,
         foreign key (task_id) references task_lifecycle(task_id)
       );
 
       create index if not exists idx_task_specs_task_number
         on task_specs(task_number);
+
+      create table if not exists task_tag_updates (
+        update_id text primary key,
+        task_id text not null,
+        task_number integer not null,
+        actor_agent_id text not null,
+        previous_tags_json text not null,
+        new_tags_json text not null,
+        reason text not null,
+        updated_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_tag_updates_task
+        on task_tag_updates(task_id, updated_at desc);
 
       create table if not exists envelope_task_mappings (
         envelope_id text primary key,
@@ -1716,6 +1798,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
     if (!lifecycleColumns.some((column) => column.name === 'priority_reason')) {
       this.db.exec('alter table task_lifecycle add column priority_reason text;');
     }
+    ensureColumn(this.db, 'task_specs', 'tags_json', "text not null default '[]'");
     ensureTaskReportsDirectiveIdColumn(this.db);
     ensureDirectedObligationTargetRefShape(this.db);
   }
@@ -3384,25 +3467,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   }
 
   upsertTaskSpec(row: TaskSpecRow): void {
-    const stmt = this.db.prepare(`
-      insert into task_specs (
-        task_id, task_number, title, chapter_markdown, goal_markdown,
-        context_markdown, required_work_markdown, non_goals_markdown,
-        acceptance_criteria_json, dependencies_json, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      on conflict(task_id) do update set
-        task_number = excluded.task_number,
-        title = excluded.title,
-        chapter_markdown = excluded.chapter_markdown,
-        goal_markdown = excluded.goal_markdown,
-        context_markdown = excluded.context_markdown,
-        required_work_markdown = excluded.required_work_markdown,
-        non_goals_markdown = excluded.non_goals_markdown,
-        acceptance_criteria_json = excluded.acceptance_criteria_json,
-        dependencies_json = excluded.dependencies_json,
-        updated_at = excluded.updated_at
-    `);
-    stmt.run(
+    const commonValues = [
       row.task_id,
       row.task_number,
       row.title,
@@ -3414,7 +3479,47 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       row.acceptance_criteria_json ?? '[]',
       row.dependencies_json ?? '[]',
       row.updated_at ?? nowIso(),
-    );
+    ];
+    if (row.tags_json === undefined || row.tags_json === null) {
+      this.db.prepare(`
+        insert into task_specs (
+          task_id, task_number, title, chapter_markdown, goal_markdown,
+          context_markdown, required_work_markdown, non_goals_markdown,
+          acceptance_criteria_json, dependencies_json, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(task_id) do update set
+          task_number = excluded.task_number,
+          title = excluded.title,
+          chapter_markdown = excluded.chapter_markdown,
+          goal_markdown = excluded.goal_markdown,
+          context_markdown = excluded.context_markdown,
+          required_work_markdown = excluded.required_work_markdown,
+          non_goals_markdown = excluded.non_goals_markdown,
+          acceptance_criteria_json = excluded.acceptance_criteria_json,
+          dependencies_json = excluded.dependencies_json,
+          updated_at = excluded.updated_at
+      `).run(...commonValues);
+      return;
+    }
+    this.db.prepare(`
+      insert into task_specs (
+        task_id, task_number, title, chapter_markdown, goal_markdown,
+        context_markdown, required_work_markdown, non_goals_markdown,
+        acceptance_criteria_json, dependencies_json, tags_json, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(task_id) do update set
+        task_number = excluded.task_number,
+        title = excluded.title,
+        chapter_markdown = excluded.chapter_markdown,
+        goal_markdown = excluded.goal_markdown,
+        context_markdown = excluded.context_markdown,
+        required_work_markdown = excluded.required_work_markdown,
+        non_goals_markdown = excluded.non_goals_markdown,
+        acceptance_criteria_json = excluded.acceptance_criteria_json,
+        dependencies_json = excluded.dependencies_json,
+        tags_json = excluded.tags_json,
+        updated_at = excluded.updated_at
+    `).run(...commonValues.slice(0, -1), row.tags_json, commonValues.at(-1));
   }
 
   getTaskSpec(taskId: string): TaskSpecRow | undefined {
@@ -3422,6 +3527,107 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       .prepare('select * from task_specs where task_id = ?')
       .get(taskId) as Record<string, unknown> | undefined;
     return row ? rowToTaskSpec(row) : undefined;
+  }
+
+  getAllTaskSpecs(): TaskSpecRow[] {
+    const rows = this.db.prepare('select * from task_specs order by task_number asc').all() as Record<string, unknown>[];
+    return rows.map(rowToTaskSpec);
+  }
+
+  replaceTaskTags(options: {
+    taskId: string;
+    tags: string[];
+    actorAgentId: string;
+    reason: string;
+    updateId: string;
+    updatedAt?: string;
+  }): TaskTagUpdateResult {
+    const tags = normalizeTaskTags(options.tags);
+    const updatedAt = options.updatedAt ?? nowIso();
+    let lifecycle: TaskLifecycleRow | undefined;
+    let previousTags: string[] = [];
+    this.db.exec('begin immediate');
+    try {
+      // Lock before reading the current spec. Otherwise two writers can both
+      // observe the same previous tag set and emit contradictory audit rows.
+      lifecycle = this.getLifecycle(options.taskId);
+      if (!lifecycle) throw new Error(`task_not_found: ${options.taskId}`);
+      let spec = this.getTaskSpec(options.taskId);
+      if (!spec) {
+        // A legacy/lifecycle-only task is still taggable. Materialize the
+        // minimal spec inside the same transaction before recording the tag
+        // change, preserving one coherent SQLite authority.
+        this.db.prepare(`
+          insert into task_specs (
+            task_id, task_number, title, chapter_markdown, goal_markdown,
+            context_markdown, required_work_markdown, non_goals_markdown,
+            acceptance_criteria_json, dependencies_json, tags_json, updated_at
+          ) values (?, ?, ?, null, null, null, null, null, '[]', '[]', '[]', ?)
+        `).run(
+          options.taskId,
+          lifecycle.task_number,
+          `Task ${lifecycle.task_number}`,
+          updatedAt,
+        );
+        spec = this.getTaskSpec(options.taskId);
+      }
+      if (!spec) throw new Error(`task_spec_not_found: ${options.taskId}`);
+      previousTags = parseStoredTaskTags(spec.tags_json);
+      if (JSON.stringify(previousTags) === JSON.stringify(tags)) {
+        this.db.exec('commit');
+        return {
+          status: 'unchanged',
+          update_id: null,
+          task_id: options.taskId,
+          task_number: lifecycle.task_number,
+          actor_agent_id: options.actorAgentId,
+          previous_tags: previousTags,
+          tags,
+          reason: options.reason,
+          updated_at: spec.updated_at ?? updatedAt,
+        };
+      }
+      this.db.prepare('update task_specs set tags_json = ?, updated_at = ? where task_id = ?')
+        .run(JSON.stringify(tags), updatedAt, options.taskId);
+      this.db.prepare(`
+        insert into task_tag_updates (
+          update_id, task_id, task_number, actor_agent_id,
+          previous_tags_json, new_tags_json, reason, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        options.updateId,
+        options.taskId,
+        lifecycle.task_number,
+        options.actorAgentId,
+        JSON.stringify(previousTags),
+        JSON.stringify(tags),
+        options.reason,
+        updatedAt,
+      );
+      this.db.exec('commit');
+    } catch (error) {
+      try { this.db.exec('rollback'); } catch { /* preserve original failure */ }
+      throw error;
+    }
+    if (!lifecycle) throw new Error(`task_not_found: ${options.taskId}`);
+    return {
+      status: 'updated',
+      update_id: options.updateId,
+      task_id: options.taskId,
+      task_number: lifecycle.task_number,
+      actor_agent_id: options.actorAgentId,
+      previous_tags: previousTags,
+      tags,
+      reason: options.reason,
+      updated_at: updatedAt,
+    };
+  }
+
+  listTaskTagUpdates(taskId: string, limit = 20): TaskTagUpdateRow[] {
+    const rows = this.db.prepare(
+      'select * from task_tag_updates where task_id = ? order by updated_at desc, update_id desc limit ?',
+    ).all(taskId, Math.max(1, Math.min(limit, 100))) as Record<string, unknown>[];
+    return rows.map(rowToTaskTagUpdate);
   }
 
   getTaskSpecByNumber(taskNumber: number): TaskSpecRow | undefined {
