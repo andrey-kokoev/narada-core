@@ -31,7 +31,7 @@ import {
   assertSqliteRuntimeSupported,
   selectSqliteRuntime,
 } from "./sqlite-runtime.js";
-import { normalizeTaskTags, parseStoredTaskTags } from './task-tags.js';
+import { normalizeTaskTags, parseStoredTaskTags, requireTaskTagsArray } from './task-tags.js';
 
 type Db = Database;
 
@@ -319,8 +319,7 @@ export interface TaskSpecRow {
   updated_at?: string;
 }
 
-export interface TaskTagUpdateRow {
-  update_id: string;
+export interface TaskTagUpdateFields {
   task_id: string;
   task_number: number;
   actor_agent_id: string;
@@ -330,16 +329,13 @@ export interface TaskTagUpdateRow {
   updated_at: string;
 }
 
-export interface TaskTagUpdateResult {
+export interface TaskTagUpdateRow extends TaskTagUpdateFields {
+  update_id: string;
+}
+
+export interface TaskTagUpdateResult extends TaskTagUpdateFields {
   status: 'updated' | 'unchanged';
   update_id: string | null;
-  task_id: string;
-  task_number: number;
-  actor_agent_id: string;
-  previous_tags: string[];
-  tags: string[];
-  reason: string;
-  updated_at: string;
 }
 
 export interface EnvelopeTaskMappingRow {
@@ -1182,6 +1178,7 @@ export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
         on task_tag_updates(task_id, updated_at desc);
     `);
     ensureIdentityRefColumns(db);
+    ensureColumn(db, 'agent_roster', 'operator_identity', 'text');
     initializedLifecycleDbPaths.add(dbPath);
   }
   return store;
@@ -3542,7 +3539,7 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
     updateId: string;
     updatedAt?: string;
   }): TaskTagUpdateResult {
-    const tags = normalizeTaskTags(options.tags);
+    const tags = requireTaskTagsArray(options.tags);
     const updatedAt = options.updatedAt ?? nowIso();
     let lifecycle: TaskLifecycleRow | undefined;
     let previousTags: string[] = [];

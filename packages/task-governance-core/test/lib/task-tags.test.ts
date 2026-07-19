@@ -3,6 +3,7 @@ import Database from '../../src/sqlite-database.js';
 import {
   MAX_TASK_TAGS,
   normalizeTaskTags,
+  requireTaskTagsArray,
   parseTaskTagsValue,
   parseStoredTaskTags,
 } from '../../src/task-tags.js';
@@ -17,6 +18,14 @@ describe('task tags', () => {
   it('enforces the bounded tag shape', () => {
     expect(() => normalizeTaskTags(Array.from({ length: MAX_TASK_TAGS + 1 }, (_, index) => `tag-${index}`))).toThrow('task_tags_limit_exceeded');
     expect(() => normalizeTaskTags(['not/a-label'])).toThrow('task_tag_invalid_format');
+  });
+
+  it('keeps optional persisted parsing separate from strict mutation input', () => {
+    expect(normalizeTaskTags(undefined)).toEqual([]);
+    expect(normalizeTaskTags(null)).toEqual([]);
+    expect(requireTaskTagsArray(['MCP Surface'])).toEqual(['mcp-surface']);
+    expect(() => requireTaskTagsArray(undefined)).toThrow('task_tags_must_be_array');
+    expect(() => requireTaskTagsArray(null)).toThrow('task_tags_must_be_array');
   });
 
   it('reads tags from task frontmatter without inferring them', () => {

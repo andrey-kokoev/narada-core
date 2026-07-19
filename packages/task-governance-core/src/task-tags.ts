@@ -30,6 +30,12 @@ export function normalizeTaskTags(value: unknown): string[] {
   return [...new Set(value.map(normalizeTaskTag))].sort();
 }
 
+/** Require an explicit array at a mutation boundary before normalizing it. */
+export function requireTaskTagsArray(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error('task_tags_must_be_array');
+  return normalizeTaskTags(value);
+}
+
 /** Parse the comma-separated or array form used by task frontmatter. */
 export function parseTaskTagsValue(value: unknown): string[] {
   if (value === undefined || value === null) return [];
