@@ -276,6 +276,7 @@ export function admitTaskExecutabilityAssessment(args: {
     verdict: TaskExecutabilityVerdict;
     findings: TaskExecutabilityFinding[];
     evaluator: {
+      schema?: string;
       profile: string;
       profile_version: string;
       cognition: 'low';
