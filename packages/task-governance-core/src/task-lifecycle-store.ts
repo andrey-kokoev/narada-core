@@ -32,6 +32,14 @@ import {
   selectSqliteRuntime,
 } from "./sqlite-runtime.js";
 import { normalizeTaskTags, parseStoredTaskTags, requireTaskTagsArray } from './task-tags.js';
+import type {
+  TaskExecutabilityRequestExecutionState,
+  TaskExecutabilityVerdict,
+} from './task-executability-contract.js';
+import {
+  canonicalizeForDigest,
+  sha256Hex,
+} from './task-executability-contract.js';
 
 type Db = Database;
 
@@ -345,6 +353,62 @@ export interface EnvelopeTaskMappingRow {
   materialized_at: string;
 }
 
+export interface TaskExecutabilityRequestRow {
+  request_id: string;
+  task_id: string;
+  task_number: number;
+  state: TaskExecutabilityRequestExecutionState;
+  task_spec_digest: string;
+  environment_digest: string;
+  evaluator_profile: string;
+  evaluator_profile_version: string;
+  assessment_id: string | null;
+  lease_owner: string | null;
+  lease_expires_at: string | null;
+  attempt_count: number;
+  superseded_by_request_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskExecutabilityAssessmentRow {
+  assessment_id: string;
+  request_id: string;
+  task_id: string;
+  task_number: number;
+  task_spec_digest: string;
+  environment_digest: string;
+  verdict: TaskExecutabilityVerdict;
+  findings_json: string;
+  evaluator_json: string;
+  created_at: string;
+}
+
+export interface TaskExecutabilityOverrideRow {
+  override_id: string;
+  task_id: string;
+  task_spec_digest: string;
+  dispatch_fingerprint: string;
+  actor: string;
+  reason: string;
+  authority_basis_json: string;
+  created_at: string;
+  consumed_at: string | null;
+}
+
+export interface TaskExecutabilityAttemptRow {
+  attempt_id: string;
+  request_id: string;
+  actor: string;
+  leased_at: string;
+  lease_expires_at: string;
+  state: TaskExecutabilityRequestExecutionState;
+  delegated_task_id: string | null;
+  worker_run_id: string | null;
+  error_json: string | null;
+  created_at: string;
+}
+
 export interface TaskLifecycleDetailRow extends TaskLifecycleRow {
   title: string | null;
   assigned_agent: string | null;
@@ -563,6 +627,21 @@ export interface TaskLifecycleStore {
   upsertEnvelopeTaskMapping(envelopeId: string, taskId: string, taskNumber: number, materializedAt: string): void;
   getTaskByEnvelopeId(envelopeId: string): EnvelopeTaskMappingRow | undefined;
   getEnvelopeMappingsByTaskId(taskId: string): EnvelopeTaskMappingRow[];
+  // Task executability (Task 2224 — durable request/assessment authority)
+  upsertExecutabilityRequest(row: TaskExecutabilityRequestRow): void;
+  getExecutabilityRequest(requestId: string): TaskExecutabilityRequestRow | undefined;
+  listExecutabilityRequestsForTask(taskId: string, limit?: number): TaskExecutabilityRequestRow[];
+  leaseExecutabilityRequest(requestId: string, actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined;
+  recordExecutabilityAttempt(row: TaskExecutabilityAttemptRow): void;
+  completeExecutabilityRequest(requestId: string, assessmentId: string): void;
+  failExecutabilityRequest(requestId: string, state: 'failed_retryable' | 'failed_terminal', failureJson: string): void;
+  upsertExecutabilityAssessment(row: TaskExecutabilityAssessmentRow): void;
+  getExecutabilityAssessment(assessmentId: string): TaskExecutabilityAssessmentRow | undefined;
+  listExecutabilityAssessmentsForTask(taskId: string, limit?: number): TaskExecutabilityAssessmentRow[];
+  upsertExecutabilityOverride(row: TaskExecutabilityOverrideRow): void;
+  getExecutabilityOverride(overrideId: string): TaskExecutabilityOverrideRow | undefined;
+  listExecutabilityOverridesForTask(taskId: string): TaskExecutabilityOverrideRow[];
+  consumeExecutabilityOverride(overrideId: string, consumedAt: string): void;
 }
 
 function nowIso(): string {
@@ -949,6 +1028,70 @@ function rowToEnvelopeTaskMapping(row: Record<string, unknown>): EnvelopeTaskMap
   };
 }
 
+function rowToExecutabilityRequest(row: Record<string, unknown>): TaskExecutabilityRequestRow {
+  return {
+    request_id: String(row.request_id),
+    task_id: String(row.task_id),
+    task_number: Number(row.task_number),
+    state: String(row.state) as TaskExecutabilityRequestExecutionState,
+    task_spec_digest: String(row.task_spec_digest),
+    environment_digest: String(row.environment_digest),
+    evaluator_profile: String(row.evaluator_profile),
+    evaluator_profile_version: String(row.evaluator_profile_version),
+    assessment_id: row.assessment_id ? String(row.assessment_id) : null,
+    lease_owner: row.lease_owner ? String(row.lease_owner) : null,
+    lease_expires_at: row.lease_expires_at ? String(row.lease_expires_at) : null,
+    attempt_count: row.attempt_count !== null && row.attempt_count !== undefined ? Number(row.attempt_count) : 0,
+    superseded_by_request_id: row.superseded_by_request_id ? String(row.superseded_by_request_id) : null,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function rowToExecutabilityAssessment(row: Record<string, unknown>): TaskExecutabilityAssessmentRow {
+  return {
+    assessment_id: String(row.assessment_id),
+    request_id: String(row.request_id),
+    task_id: String(row.task_id),
+    task_number: Number(row.task_number),
+    task_spec_digest: String(row.task_spec_digest),
+    environment_digest: String(row.environment_digest),
+    verdict: String(row.verdict) as TaskExecutabilityVerdict,
+    findings_json: String(row.findings_json),
+    evaluator_json: String(row.evaluator_json),
+    created_at: String(row.created_at),
+  };
+}
+
+function rowToExecutabilityOverride(row: Record<string, unknown>): TaskExecutabilityOverrideRow {
+  return {
+    override_id: String(row.override_id),
+    task_id: String(row.task_id),
+    task_spec_digest: String(row.task_spec_digest),
+    dispatch_fingerprint: String(row.dispatch_fingerprint),
+    actor: String(row.actor),
+    reason: String(row.reason),
+    authority_basis_json: String(row.authority_basis_json),
+    created_at: String(row.created_at),
+    consumed_at: row.consumed_at ? String(row.consumed_at) : null,
+  };
+}
+
+function rowToExecutabilityAttempt(row: Record<string, unknown>): TaskExecutabilityAttemptRow {
+  return {
+    attempt_id: String(row.attempt_id),
+    request_id: String(row.request_id),
+    actor: String(row.actor),
+    leased_at: String(row.leased_at),
+    lease_expires_at: String(row.lease_expires_at),
+    state: String(row.state) as TaskExecutabilityRequestExecutionState,
+    delegated_task_id: row.delegated_task_id ? String(row.delegated_task_id) : null,
+    worker_run_id: row.worker_run_id ? String(row.worker_run_id) : null,
+    error_json: row.error_json ? String(row.error_json) : null,
+    created_at: String(row.created_at),
+  };
+}
+
 function normalizeDirectedObligation(entry: DirectedObligationRow): DirectedObligationRow {
   const duplicateRoleRef = entry.target_role ? `role:${entry.target_role}` : null;
   if (entry.target_agent_id === null && duplicateRoleRef && entry.target_ref === duplicateRoleRef) {
@@ -1091,6 +1234,10 @@ const REQUIRED_LIFECYCLE_TABLES = [
   'task_tag_updates',
   'envelope_task_mappings',
   'narada_andrey_task_role_preferences',
+  'task_executability_requests',
+  'task_executability_assessments',
+  'task_executability_overrides',
+  'task_executability_attempts',
 ];
 
 function hasCurrentLifecycleSchema(db: Db): boolean {
@@ -1764,6 +1911,85 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
 
       create index if not exists idx_envelope_task_mappings_task_id
         on envelope_task_mappings(task_id, materialized_at desc);
+
+      create table if not exists task_executability_requests (
+        request_id text primary key,
+        task_id text not null,
+        task_number integer not null,
+        state text not null,
+        task_spec_digest text not null,
+        environment_digest text not null,
+        evaluator_profile text not null,
+        evaluator_profile_version text not null,
+        assessment_id text,
+        lease_owner text,
+        lease_expires_at text,
+        attempt_count integer not null default 0,
+        superseded_by_request_id text,
+        created_at text not null,
+        updated_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_executability_requests_task
+        on task_executability_requests(task_id);
+
+      create index if not exists idx_task_executability_requests_state_lease
+        on task_executability_requests(state, lease_expires_at);
+
+      create table if not exists task_executability_assessments (
+        assessment_id text primary key,
+        request_id text not null,
+        task_id text not null,
+        task_number integer not null,
+        task_spec_digest text not null,
+        environment_digest text not null,
+        verdict text not null,
+        findings_json text not null,
+        evaluator_json text not null,
+        created_at text not null,
+        foreign key (request_id) references task_executability_requests(request_id),
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_executability_assessments_task
+        on task_executability_assessments(task_id);
+
+      create index if not exists idx_task_executability_assessments_request
+        on task_executability_assessments(request_id);
+
+      create table if not exists task_executability_overrides (
+        override_id text primary key,
+        task_id text not null,
+        task_spec_digest text not null,
+        dispatch_fingerprint text not null,
+        actor text not null,
+        reason text not null,
+        authority_basis_json text not null,
+        created_at text not null,
+        consumed_at text,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create index if not exists idx_task_executability_overrides_task
+        on task_executability_overrides(task_id);
+
+      create table if not exists task_executability_attempts (
+        attempt_id text primary key,
+        request_id text not null,
+        actor text not null,
+        leased_at text not null,
+        lease_expires_at text not null,
+        state text not null,
+        delegated_task_id text,
+        worker_run_id text,
+        error_json text,
+        created_at text not null,
+        foreign key (request_id) references task_executability_requests(request_id)
+      );
+
+      create index if not exists idx_task_executability_attempts_request
+        on task_executability_attempts(request_id);
 
       create table if not exists narada_andrey_task_role_preferences (
         task_id text primary key,
@@ -3660,6 +3886,258 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       .prepare('select * from envelope_task_mappings where task_id = ? order by materialized_at desc')
       .all(taskId) as Record<string, unknown>[];
     return rows.map(rowToEnvelopeTaskMapping);
+  }
+
+  upsertExecutabilityRequest(row: TaskExecutabilityRequestRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_executability_requests (
+        request_id, task_id, task_number, state, task_spec_digest, environment_digest,
+        evaluator_profile, evaluator_profile_version, assessment_id, lease_owner,
+        lease_expires_at, attempt_count, superseded_by_request_id, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(request_id) do update set
+        task_id = excluded.task_id,
+        task_number = excluded.task_number,
+        state = excluded.state,
+        task_spec_digest = excluded.task_spec_digest,
+        environment_digest = excluded.environment_digest,
+        evaluator_profile = excluded.evaluator_profile,
+        evaluator_profile_version = excluded.evaluator_profile_version,
+        assessment_id = excluded.assessment_id,
+        lease_owner = excluded.lease_owner,
+        lease_expires_at = excluded.lease_expires_at,
+        attempt_count = excluded.attempt_count,
+        superseded_by_request_id = excluded.superseded_by_request_id,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(
+      row.request_id,
+      row.task_id,
+      row.task_number,
+      row.state,
+      row.task_spec_digest,
+      row.environment_digest,
+      row.evaluator_profile,
+      row.evaluator_profile_version,
+      row.assessment_id ?? null,
+      row.lease_owner ?? null,
+      row.lease_expires_at ?? null,
+      row.attempt_count ?? 0,
+      row.superseded_by_request_id ?? null,
+      row.created_at,
+      row.updated_at,
+    );
+  }
+
+  getExecutabilityRequest(requestId: string): TaskExecutabilityRequestRow | undefined {
+    const row = this.db
+      .prepare('select * from task_executability_requests where request_id = ?')
+      .get(requestId) as Record<string, unknown> | undefined;
+    return row ? rowToExecutabilityRequest(row) : undefined;
+  }
+
+  listExecutabilityRequestsForTask(taskId: string, limit = 100): TaskExecutabilityRequestRow[] {
+    const bounded = Math.max(1, Math.min(limit, 1000));
+    const rows = this.db
+      .prepare('select * from task_executability_requests where task_id = ? order by created_at desc, request_id desc limit ?')
+      .all(taskId, bounded) as Record<string, unknown>[];
+    return rows.map(rowToExecutabilityRequest);
+  }
+
+  leaseExecutabilityRequest(requestId: string, actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined {
+    const now = nowIso();
+    const leaseExpiresAt = new Date(Date.now() + leaseDurationMinutes * 60 * 1000).toISOString();
+    const update = this.db.prepare(`
+      update task_executability_requests
+      set state = 'leased',
+          lease_owner = ?,
+          lease_expires_at = ?,
+          attempt_count = attempt_count + 1,
+          updated_at = ?
+      where request_id = ?
+        and (
+          state = 'pending'
+          or (state = 'leased' and lease_expires_at < ?)
+          or (state = 'failed_retryable' and lease_expires_at < ?)
+        )
+    `);
+    const result = update.run(actor, leaseExpiresAt, now, requestId, now, now);
+    if (result.changes === 0) return undefined;
+
+    const attemptId = `texm_${sha256Hex(canonicalizeForDigest({ kind: 'attempt', request_id: requestId, actor, leased_at: now })).slice(0, 32)}`;
+    this.recordExecutabilityAttempt({
+      attempt_id: attemptId,
+      request_id: requestId,
+      actor,
+      leased_at: now,
+      lease_expires_at: leaseExpiresAt,
+      state: 'leased',
+      delegated_task_id: null,
+      worker_run_id: null,
+      error_json: null,
+      created_at: now,
+    });
+    return this.getExecutabilityRequest(requestId);
+  }
+
+  recordExecutabilityAttempt(row: TaskExecutabilityAttemptRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_executability_attempts (
+        attempt_id, request_id, actor, leased_at, lease_expires_at, state,
+        delegated_task_id, worker_run_id, error_json, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      row.attempt_id,
+      row.request_id,
+      row.actor,
+      row.leased_at,
+      row.lease_expires_at,
+      row.state,
+      row.delegated_task_id ?? null,
+      row.worker_run_id ?? null,
+      row.error_json ?? null,
+      row.created_at,
+    );
+  }
+
+  completeExecutabilityRequest(requestId: string, assessmentId: string): void {
+    const stmt = this.db.prepare(`
+      update task_executability_requests
+      set state = 'completed', assessment_id = ?, updated_at = ?
+      where request_id = ?
+    `);
+    const result = stmt.run(assessmentId, nowIso(), requestId);
+    if (result.changes === 0) {
+      throw new Error(`Executability request ${requestId} not found`);
+    }
+  }
+
+  failExecutabilityRequest(requestId: string, state: 'failed_retryable' | 'failed_terminal', failureJson: string): void {
+    const now = nowIso();
+    const update = this.db.prepare(`
+      update task_executability_requests
+      set state = ?, updated_at = ?
+      where request_id = ?
+    `);
+    const result = update.run(state, now, requestId);
+    if (result.changes === 0) {
+      throw new Error(`Executability request ${requestId} not found`);
+    }
+    const attemptId = `texm_${sha256Hex(canonicalizeForDigest({ kind: 'attempt', request_id: requestId, actor: 'system', leased_at: now, failure: true })).slice(0, 32)}`;
+    this.recordExecutabilityAttempt({
+      attempt_id: attemptId,
+      request_id: requestId,
+      actor: 'system',
+      leased_at: now,
+      lease_expires_at: now,
+      state,
+      delegated_task_id: null,
+      worker_run_id: null,
+      error_json: failureJson,
+      created_at: now,
+    });
+  }
+
+  upsertExecutabilityAssessment(row: TaskExecutabilityAssessmentRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_executability_assessments (
+        assessment_id, request_id, task_id, task_number, task_spec_digest,
+        environment_digest, verdict, findings_json, evaluator_json, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(assessment_id) do update set
+        request_id = excluded.request_id,
+        task_id = excluded.task_id,
+        task_number = excluded.task_number,
+        task_spec_digest = excluded.task_spec_digest,
+        environment_digest = excluded.environment_digest,
+        verdict = excluded.verdict,
+        findings_json = excluded.findings_json,
+        evaluator_json = excluded.evaluator_json,
+        created_at = excluded.created_at
+    `);
+    stmt.run(
+      row.assessment_id,
+      row.request_id,
+      row.task_id,
+      row.task_number,
+      row.task_spec_digest,
+      row.environment_digest,
+      row.verdict,
+      row.findings_json,
+      row.evaluator_json,
+      row.created_at,
+    );
+  }
+
+  getExecutabilityAssessment(assessmentId: string): TaskExecutabilityAssessmentRow | undefined {
+    const row = this.db
+      .prepare('select * from task_executability_assessments where assessment_id = ?')
+      .get(assessmentId) as Record<string, unknown> | undefined;
+    return row ? rowToExecutabilityAssessment(row) : undefined;
+  }
+
+  listExecutabilityAssessmentsForTask(taskId: string, limit = 100): TaskExecutabilityAssessmentRow[] {
+    const bounded = Math.max(1, Math.min(limit, 1000));
+    const rows = this.db
+      .prepare('select * from task_executability_assessments where task_id = ? order by created_at desc, assessment_id desc limit ?')
+      .all(taskId, bounded) as Record<string, unknown>[];
+    return rows.map(rowToExecutabilityAssessment);
+  }
+
+  upsertExecutabilityOverride(row: TaskExecutabilityOverrideRow): void {
+    const stmt = this.db.prepare(`
+      insert into task_executability_overrides (
+        override_id, task_id, task_spec_digest, dispatch_fingerprint, actor,
+        reason, authority_basis_json, created_at, consumed_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(override_id) do update set
+        task_id = excluded.task_id,
+        task_spec_digest = excluded.task_spec_digest,
+        dispatch_fingerprint = excluded.dispatch_fingerprint,
+        actor = excluded.actor,
+        reason = excluded.reason,
+        authority_basis_json = excluded.authority_basis_json,
+        created_at = excluded.created_at,
+        consumed_at = excluded.consumed_at
+    `);
+    stmt.run(
+      row.override_id,
+      row.task_id,
+      row.task_spec_digest,
+      row.dispatch_fingerprint,
+      row.actor,
+      row.reason,
+      row.authority_basis_json,
+      row.created_at,
+      row.consumed_at ?? null,
+    );
+  }
+
+  getExecutabilityOverride(overrideId: string): TaskExecutabilityOverrideRow | undefined {
+    const row = this.db
+      .prepare('select * from task_executability_overrides where override_id = ?')
+      .get(overrideId) as Record<string, unknown> | undefined;
+    return row ? rowToExecutabilityOverride(row) : undefined;
+  }
+
+  listExecutabilityOverridesForTask(taskId: string): TaskExecutabilityOverrideRow[] {
+    const rows = this.db
+      .prepare('select * from task_executability_overrides where task_id = ? order by created_at desc')
+      .all(taskId) as Record<string, unknown>[];
+    return rows.map(rowToExecutabilityOverride);
+  }
+
+  consumeExecutabilityOverride(overrideId: string, consumedAt: string): void {
+    const stmt = this.db.prepare(`
+      update task_executability_overrides
+      set consumed_at = ?
+      where override_id = ? and consumed_at is null
+    `);
+    const result = stmt.run(consumedAt, overrideId);
+    if (result.changes === 0) {
+      throw new Error(`Executability override ${overrideId} not found or already consumed`);
+    }
   }
 }
 

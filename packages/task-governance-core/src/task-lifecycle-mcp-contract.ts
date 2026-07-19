@@ -225,6 +225,26 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
     tool('task_lifecycle_create', 'Create a new task from an immutable payload_ref carrying title, goal, context, required work, non-goals, acceptance criteria, optional site-local tags, and optional preferred/target roles.', objectSchema({
       payload_ref: stringSchema('Required immutable transient payload ref such as mcp_payload:<id>@v1. Payload must contain the task definition.'),
     }, ['payload_ref'], { payloadRef: false })),
+    tool('task_lifecycle_executability_request', 'Request an asynchronous task executability assessment for a task. Idempotent: returns the existing pending request if one with identical digests already exists.', objectSchema({
+      task_number: numberSchema('Task number to assess.'),
+      agent_id: stringSchema('Agent id requesting the assessment.'),
+    }, ['task_number', 'agent_id'])),
+    tool('task_lifecycle_executability_status', 'Show the current executability posture for a task: policy, latest request, admitted assessment, currency, and derived executable flag.', objectSchema({
+      task_number: numberSchema('Task number to inspect.'),
+    }, ['task_number'])),
+    tool('task_lifecycle_executability_requests_next', 'Lease the next available executability request(s) for a consumer. Atomic: each request is leased to one consumer at a time; expired leases become available again.', objectSchema({
+      consumer_id: stringSchema('Consumer identity acquiring the lease.'),
+      lease_duration_minutes: numberSchema('Lease duration in minutes. Defaults to 10.'),
+      limit: numberSchema('Maximum requests to lease. Defaults to 1.'),
+    }, ['consumer_id'])),
+    tool('task_lifecycle_executability_complete', 'Admit an executability assessment for a leased request and mark the request completed.', objectSchema({
+      request_id: stringSchema('Executability request id to complete.'),
+      assessment: { type: 'object', additionalProperties: true, description: 'Task executability assessment payload matching narada.task_executability_assessment.v1.' },
+    }, ['request_id', 'assessment'], { payloadRef: false })),
+    tool('task_lifecycle_executability_dispatch_check', 'Check whether a concrete dispatch is allowed to proceed based on the current assessment or a one-shot operator override.', objectSchema({
+      task_number: numberSchema('Task number to check dispatch for.'),
+      dispatch_fingerprint: stringSchema('Optional dispatch fingerprint; computed from task and environment if omitted.'),
+    }, ['task_number'])),
     ...recurringTools(),
     tool('task_lifecycle_set_routing', 'Route an opened task to a target role, preferred agent, and/or relative priority without claiming it as that agent.', objectSchema({
       task_number: numberSchema('Task number to route. Must currently be opened.'),

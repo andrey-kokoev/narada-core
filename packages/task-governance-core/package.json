@@ -34,7 +34,8 @@
     "./mutation-evidence": { "types": "./dist/mutation-evidence.d.ts", "import": "./dist/mutation-evidence.js" },
     "./sqlite-runtime": { "types": "./dist/sqlite-runtime.d.ts", "import": "./dist/sqlite-runtime.js" },
     "./sqlite-database": { "types": "./dist/sqlite-database.d.ts", "import": "./dist/sqlite-database.js" },
-    "./task-executability-contract": { "types": "./dist/task-executability-contract.d.ts", "import": "./dist/task-executability-contract.js" }
+    "./task-executability-contract": { "types": "./dist/task-executability-contract.d.ts", "import": "./dist/task-executability-contract.js" },
+    "./task-executability-service": { "types": "./dist/task-executability-service.d.ts", "import": "./dist/task-executability-service.js" }
   },
   "scripts": {
     "build": "tsc",

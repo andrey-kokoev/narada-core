@@ -17,6 +17,9 @@ import {
   type ReconciliationFindingRow,
   type TaskReportRow,
   type TaskReviewRow,
+  type TaskExecutabilityRequestRow,
+  type TaskExecutabilityAssessmentRow,
+  type TaskExecutabilityOverrideRow,
 } from '../../src/task-lifecycle-store.js';
 import { SQLITE_BACKEND_ENV } from '../../src/sqlite-runtime.js';
 
@@ -265,6 +268,17 @@ describe('SqliteTaskLifecycleStore', () => {
       expect(() =>
         store.upsertLifecycle({ ...baseLifecycle, task_id: 'different-id', task_number: 562 }),
       ).toThrow();
+    });
+
+    it('creates executability tables on schema init', () => {
+      const tables = db
+        .prepare("select name from sqlite_master where type = 'table'")
+        .pluck()
+        .all() as string[];
+      expect(tables).toContain('task_executability_requests');
+      expect(tables).toContain('task_executability_assessments');
+      expect(tables).toContain('task_executability_overrides');
+      expect(tables).toContain('task_executability_attempts');
     });
 
     describe('updateStatus', () => {
@@ -745,6 +759,147 @@ describe('SqliteTaskLifecycleStore', () => {
       // FK violations in a single statement is to abort the current statement
       // and return an error. We expect this to throw.
       expect(() => store.insertAssignment(assignment)).toThrow();
+    });
+  });
+
+  describe('executability request lifecycle', () => {
+    const lifecycle: TaskLifecycleRow = {
+      task_id: 'task-exec-1',
+      task_number: 901,
+      status: 'opened',
+      governed_by: null,
+      closed_at: null,
+      closed_by: null,
+      reopened_at: null,
+      reopened_by: null,
+      continuation_packet_json: null,
+      updated_at: '2026-07-19T12:00:00.000Z',
+    };
+
+    const request: TaskExecutabilityRequestRow = {
+      request_id: 'texr_901a',
+      task_id: 'task-exec-1',
+      task_number: 901,
+      state: 'pending',
+      task_spec_digest: 'spec-digest-a',
+      environment_digest: 'env-digest-a',
+      evaluator_profile: 'shoshin-v1',
+      evaluator_profile_version: '1.0.0',
+      assessment_id: null,
+      lease_owner: null,
+      lease_expires_at: null,
+      attempt_count: 0,
+      superseded_by_request_id: null,
+      created_at: '2026-07-19T12:00:00.000Z',
+      updated_at: '2026-07-19T12:00:00.000Z',
+    };
+
+    beforeEach(() => {
+      store.upsertLifecycle(lifecycle);
+    });
+
+    it('upserts and reads executability requests', () => {
+      store.upsertExecutabilityRequest(request);
+      const read = store.getExecutabilityRequest(request.request_id);
+      expect(read).toEqual(request);
+    });
+
+    it('lists executability requests for a task ordered by created_at desc', () => {
+      store.upsertExecutabilityRequest(request);
+      store.upsertExecutabilityRequest({
+        ...request,
+        request_id: 'texr_901b',
+        task_spec_digest: 'spec-digest-b',
+        created_at: '2026-07-19T13:00:00.000Z',
+        updated_at: '2026-07-19T13:00:00.000Z',
+      });
+      const list = store.listExecutabilityRequestsForTask('task-exec-1');
+      expect(list).toHaveLength(2);
+      expect(list[0]!.request_id).toBe('texr_901b');
+    });
+
+    it('leases a pending request atomically and records an attempt', () => {
+      store.upsertExecutabilityRequest(request);
+      const leased = store.leaseExecutabilityRequest(request.request_id, 'consumer-1', 10);
+      expect(leased).toBeDefined();
+      expect(leased!.state).toBe('leased');
+      expect(leased!.lease_owner).toBe('consumer-1');
+      expect(leased!.attempt_count).toBe(1);
+      const attempts = db
+        .prepare('select * from task_executability_attempts where request_id = ?')
+        .all(request.request_id) as unknown[];
+      expect(attempts).toHaveLength(1);
+    });
+
+    it('does not lease a request that is already leased and not expired', () => {
+      store.upsertExecutabilityRequest(request);
+      const first = store.leaseExecutabilityRequest(request.request_id, 'consumer-1', 10);
+      expect(first).toBeDefined();
+      const second = store.leaseExecutabilityRequest(request.request_id, 'consumer-2', 10);
+      expect(second).toBeUndefined();
+    });
+
+    it('recovers an expired lease for a new consumer', () => {
+      store.upsertExecutabilityRequest(request);
+      const leased = store.leaseExecutabilityRequest(request.request_id, 'consumer-1', -1);
+      expect(leased).toBeDefined();
+      const recovered = store.leaseExecutabilityRequest(request.request_id, 'consumer-2', 10);
+      expect(recovered).toBeDefined();
+      expect(recovered!.lease_owner).toBe('consumer-2');
+      expect(recovered!.attempt_count).toBe(2);
+    });
+
+    it('completes a request and links an assessment', () => {
+      store.upsertExecutabilityRequest(request);
+      const assessment: TaskExecutabilityAssessmentRow = {
+        assessment_id: 'texa_901a',
+        request_id: request.request_id,
+        task_id: 'task-exec-1',
+        task_number: 901,
+        task_spec_digest: 'spec-digest-a',
+        environment_digest: 'env-digest-a',
+        verdict: 'executable',
+        findings_json: '[]',
+        evaluator_json: JSON.stringify({ profile: 'shoshin-v1', profile_version: '1.0.0', cognition: 'low' }),
+        created_at: '2026-07-19T12:05:00.000Z',
+      };
+      store.upsertExecutabilityAssessment(assessment);
+      store.completeExecutabilityRequest(request.request_id, assessment.assessment_id);
+      const completed = store.getExecutabilityRequest(request.request_id);
+      expect(completed!.state).toBe('completed');
+      expect(completed!.assessment_id).toBe(assessment.assessment_id);
+    });
+
+    it('fails a request and records an error attempt', () => {
+      store.upsertExecutabilityRequest(request);
+      store.failExecutabilityRequest(request.request_id, 'failed_retryable', JSON.stringify({ kind: 'timeout', message: 'evaluator timed out' }));
+      const failed = store.getExecutabilityRequest(request.request_id);
+      expect(failed!.state).toBe('failed_retryable');
+      const attempts = db
+        .prepare('select * from task_executability_attempts where request_id = ?')
+        .all(request.request_id) as Array<{ state: string; error_json: string | null }>;
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]!.state).toBe('failed_retryable');
+      expect(attempts[0]!.error_json).toContain('timeout');
+    });
+
+    it('manages overrides with one-shot consumption', () => {
+      const override: TaskExecutabilityOverrideRow = {
+        override_id: 'texo_901a',
+        task_id: 'task-exec-1',
+        task_spec_digest: 'spec-digest-a',
+        dispatch_fingerprint: 'texd_dispatch_a',
+        actor: 'operator',
+        reason: 'manual approval',
+        authority_basis_json: JSON.stringify({ kind: 'operator_direct', summary: 'Approved' }),
+        created_at: '2026-07-19T12:00:00.000Z',
+        consumed_at: null,
+      };
+      store.upsertExecutabilityOverride(override);
+      expect(store.getExecutabilityOverride(override.override_id)?.consumed_at).toBeNull();
+      store.consumeExecutabilityOverride(override.override_id, '2026-07-19T12:01:00.000Z');
+      expect(store.getExecutabilityOverride(override.override_id)?.consumed_at).toBe('2026-07-19T12:01:00.000Z');
+      expect(() => store.consumeExecutabilityOverride(override.override_id, '2026-07-19T12:02:00.000Z')).toThrow('already consumed');
     });
   });
 });
