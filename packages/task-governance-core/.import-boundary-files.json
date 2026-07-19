@@ -24,5 +24,6 @@
   "src/task-review-authority.ts",
   "src/task-review-service.ts",
   "src/task-search-service.ts",
-  "src/task-spec.ts"
+  "src/task-spec.ts",
+  "src/task-executability-contract.ts"
 ]
