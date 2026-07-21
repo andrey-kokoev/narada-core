@@ -219,8 +219,13 @@ export function checkTaskExecutabilityDispatch(args: {
   currentEnvDigest: string;
 }): TaskExecutabilityDispatchResult {
   const { store, taskId, dispatchFingerprint, currentSpecDigest, currentEnvDigest } = args;
-  const assessments = store.listExecutabilityAssessmentsForTask(taskId, 1);
-  const assessment = assessments[0];
+  // The current request is the authority for which assessment may authorize
+  // dispatch. Selecting by evaluator timestamp can resurrect a stale result
+  // after a task-spec revision, especially when evaluator clocks tie or skew.
+  const request = store.listExecutabilityRequestsForTask(taskId, 1)[0];
+  const assessment = request?.superseded_by_request_id === null && request.assessment_id
+    ? store.getExecutabilityAssessment(request.assessment_id)
+    : undefined;
 
   if (
     assessment &&
