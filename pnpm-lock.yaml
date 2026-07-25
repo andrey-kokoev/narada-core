@@ -27,6 +27,19 @@ importers:
         specifier: ^1.0.0
         version: 1.6.1(@types/node@22.19.19)
 
+  packages/task-executability-orchestrator:
+    dependencies:
+      '@narada2/task-governance-core':
+        specifier: workspace:*
+        version: link:../task-governance-core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/task-governance-core:
     devDependencies:
       '@types/node':

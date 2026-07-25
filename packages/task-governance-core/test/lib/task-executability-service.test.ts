@@ -408,4 +408,44 @@ describe('task-executability-service', () => {
       ).toThrow('verdict_mismatch');
     });
   });
+
+  describe('Site Loop recovery leasing', () => {
+    it('reclaims an expired dispatched request after restart while preserving active polling', () => {
+      const request = enqueueTaskExecutabilityRequest({
+        store,
+        siteRoot: '.',
+        taskId: 'task-exec-1',
+        taskNumber: 901,
+        spec: SPEC,
+        environment: ENV,
+      });
+      const leased = store.leaseExecutabilityRequest(request.request_id, 'site-loop:old', 10);
+      expect(leased!.state).toBe('leased');
+      store.recordExecutabilityDispatch({
+        request_id: request.request_id,
+        state: 'dispatched',
+        delegated_task_id: 'delegated-old',
+        worker_run_id: 'worker-old',
+      });
+
+      const active = store.leaseNextExecutabilityRequest('site-loop:old', 10);
+      expect(active!.state).toBe('dispatched');
+      expect(store.getLatestExecutabilityAttempt(request.request_id)!.delegated_task_id).toBe('delegated-old');
+
+      db.prepare(`
+        update task_executability_requests
+        set lease_expires_at = ?, updated_at = ?
+        where request_id = ?
+      `).run('2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z', request.request_id);
+
+      const recovered = store.leaseNextExecutabilityRequest('site-loop:new', 10);
+      expect(recovered!.state).toBe('leased');
+      expect(recovered!.lease_owner).toBe('site-loop:new');
+      expect(recovered!.attempt_count).toBe(2);
+      expect(store.getLatestExecutabilityAttempt(request.request_id)!.state).toBe('leased');
+      expect(store.getLatestExecutabilityAttempt(request.request_id)!.delegated_task_id).toBe('delegated-old');
+      expect(store.getLatestExecutabilityAttempt(request.request_id)!.worker_run_id).toBe('worker-old');
+    });
+  });
+
 });

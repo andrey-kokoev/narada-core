@@ -632,7 +632,23 @@ export interface TaskLifecycleStore {
   getExecutabilityRequest(requestId: string): TaskExecutabilityRequestRow | undefined;
   listExecutabilityRequestsForTask(taskId: string, limit?: number): TaskExecutabilityRequestRow[];
   leaseExecutabilityRequest(requestId: string, actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined;
+  leaseNextExecutabilityRequest(actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined;
   recordExecutabilityAttempt(row: TaskExecutabilityAttemptRow): void;
+  getLatestExecutabilityAttempt(requestId: string): TaskExecutabilityAttemptRow | undefined;
+  updateExecutabilityAttempt(args: {
+    request_id: string;
+    state: TaskExecutabilityRequestExecutionState;
+    delegated_task_id?: string | null;
+    worker_run_id?: string | null;
+    error_json?: string | null;
+  }): void;
+  recordExecutabilityDispatch(args: {
+    request_id: string;
+    state: TaskExecutabilityRequestExecutionState;
+    delegated_task_id?: string | null;
+    worker_run_id?: string | null;
+    error_json?: string | null;
+  }): void;
   completeExecutabilityRequest(requestId: string, assessmentId: string): void;
   failExecutabilityRequest(requestId: string, state: 'failed_retryable' | 'failed_terminal', failureJson: string): void;
   upsertExecutabilityAssessment(row: TaskExecutabilityAssessmentRow): void;
@@ -3939,14 +3955,54 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
   listExecutabilityRequestsForTask(taskId: string, limit = 100): TaskExecutabilityRequestRow[] {
     const bounded = Math.max(1, Math.min(limit, 1000));
     const rows = this.db
-      .prepare('select * from task_executability_requests where task_id = ? order by created_at desc, request_id desc limit ?')
+      .prepare('select * from task_executability_requests where task_id = ? order by created_at desc, rowid desc limit ?')
       .all(taskId, bounded) as Record<string, unknown>[];
     return rows.map(rowToExecutabilityRequest);
+  }
+
+  /**
+   * Lease the oldest recoverable request. Selection is advisory; the existing
+   * conditional lease operation remains the concurrency authority.
+   */
+  leaseNextExecutabilityRequest(actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined {
+    const now = nowIso();
+    const candidate = this.db.prepare(`
+      select request_id, state, lease_expires_at
+      from task_executability_requests
+      where superseded_by_request_id is null
+        and (
+          state = 'pending'
+          or (state = 'leased' and lease_expires_at < ?)
+          or (state = 'failed_retryable' and lease_expires_at < ?)
+          or (state = 'dispatched' and lease_expires_at < ?)
+          or (state = 'dispatched' and lease_owner = ? and lease_expires_at >= ?)
+        )
+      order by created_at asc, rowid asc
+      limit 1
+    `).get(now, now, now, actor, now) as { request_id?: string; state?: string; lease_expires_at?: string | null } | undefined;
+    if (!candidate?.request_id) return undefined;
+    if (
+      candidate.state === 'dispatched'
+      && typeof candidate.lease_expires_at === 'string'
+      && Date.parse(candidate.lease_expires_at) >= Date.parse(now)
+    ) return this.getExecutabilityRequest(candidate.request_id);
+    return this.leaseExecutabilityRequest(candidate.request_id, actor, leaseDurationMinutes);
   }
 
   leaseExecutabilityRequest(requestId: string, actor: string, leaseDurationMinutes: number): TaskExecutabilityRequestRow | undefined {
     const now = nowIso();
     const leaseExpiresAt = new Date(Date.now() + leaseDurationMinutes * 60 * 1000).toISOString();
+    const current = this.getExecutabilityRequest(requestId);
+    const previousAttempt = current?.state === 'dispatched'
+      ? this.getLatestExecutabilityAttempt(requestId)
+      : undefined;
+    const recoveredWorkerIdentity = previousAttempt
+      && (previousAttempt.delegated_task_id !== null || previousAttempt.worker_run_id !== null)
+      ? {
+          delegated_task_id: previousAttempt.delegated_task_id,
+          worker_run_id: previousAttempt.worker_run_id,
+        }
+      : { delegated_task_id: null, worker_run_id: null };
     const update = this.db.prepare(`
       update task_executability_requests
       set state = 'leased',
@@ -3959,9 +4015,10 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
           state = 'pending'
           or (state = 'leased' and lease_expires_at < ?)
           or (state = 'failed_retryable' and lease_expires_at < ?)
+          or (state = 'dispatched' and lease_expires_at < ?)
         )
     `);
-    const result = update.run(actor, leaseExpiresAt, now, requestId, now, now);
+    const result = update.run(actor, leaseExpiresAt, now, requestId, now, now, now);
     if (result.changes === 0) return undefined;
 
     const attemptId = `texm_${sha256Hex(canonicalizeForDigest({ kind: 'attempt', request_id: requestId, actor, leased_at: now })).slice(0, 32)}`;
@@ -3972,8 +4029,8 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       leased_at: now,
       lease_expires_at: leaseExpiresAt,
       state: 'leased',
-      delegated_task_id: null,
-      worker_run_id: null,
+      delegated_task_id: recoveredWorkerIdentity.delegated_task_id,
+      worker_run_id: recoveredWorkerIdentity.worker_run_id,
       error_json: null,
       created_at: now,
     });
@@ -3999,6 +4056,56 @@ export class SqliteTaskLifecycleStore implements TaskLifecycleStore {
       row.error_json ?? null,
       row.created_at,
     );
+  }
+
+  getLatestExecutabilityAttempt(requestId: string): TaskExecutabilityAttemptRow | undefined {
+    const row = this.db.prepare(`
+      select *
+      from task_executability_attempts
+      where request_id = ?
+      order by created_at desc, rowid desc
+      limit 1
+    `).get(requestId) as Record<string, unknown> | undefined;
+    return row ? rowToExecutabilityAttempt(row) : undefined;
+  }
+
+  updateExecutabilityAttempt(args: {
+    request_id: string;
+    state: TaskExecutabilityRequestExecutionState;
+    delegated_task_id?: string | null;
+    worker_run_id?: string | null;
+    error_json?: string | null;
+  }): void {
+    const latest = this.getLatestExecutabilityAttempt(args.request_id);
+    if (!latest) throw new Error(`Executability attempt for ${args.request_id} not found`);
+    this.db.prepare(`
+      update task_executability_attempts
+      set state = ?, delegated_task_id = ?, worker_run_id = ?, error_json = ?
+      where attempt_id = ?
+    `).run(
+      args.state,
+      args.delegated_task_id ?? latest.delegated_task_id,
+      args.worker_run_id ?? latest.worker_run_id,
+      args.error_json ?? latest.error_json,
+      latest.attempt_id,
+    );
+  }
+
+  recordExecutabilityDispatch(args: {
+    request_id: string;
+    state: TaskExecutabilityRequestExecutionState;
+    delegated_task_id?: string | null;
+    worker_run_id?: string | null;
+    error_json?: string | null;
+  }): void {
+    const now = nowIso();
+    const result = this.db.prepare(`
+      update task_executability_requests
+      set state = ?, updated_at = ?
+      where request_id = ?
+    `).run(args.state, now, args.request_id);
+    if (result.changes === 0) throw new Error(`Executability request ${args.request_id} not found`);
+    this.updateExecutabilityAttempt(args);
   }
 
   completeExecutabilityRequest(requestId: string, assessmentId: string): void {
