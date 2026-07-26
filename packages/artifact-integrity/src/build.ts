@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  access,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { semanticDigest, sha256Bytes } from "./canonical.js";
 import type {
@@ -13,11 +22,16 @@ import type {
 } from "./contracts.js";
 import { ArtifactIntegrityError } from "./errors.js";
 import { assertSourceUnchanged, sealDeployment, type SealDeploymentResult } from "./store.js";
-import { captureSourceClosure, type SourceRoot } from "./tree.js";
+import {
+  captureSourceClosure,
+  materializeDeploymentTree,
+  type SourceRoot,
+} from "./tree.js";
 
 interface PackageJson {
   name?: string;
   dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   scripts?: Record<string, string>;
@@ -26,8 +40,81 @@ interface PackageJson {
   };
 }
 
+export async function discoverPackageSourceRoots(input: {
+  package_root: string;
+  workspace_root: string;
+}): Promise<{
+  configuration: PackageArtifactConfiguration;
+  source_roots: SourceRoot[];
+}> {
+  const configuration = await loadPackageArtifactConfiguration(input);
+  return {
+    configuration,
+    source_roots: await collectSourceRoots(configuration),
+  };
+}
+
 async function readPackageJson(packageRoot: string): Promise<PackageJson> {
   return JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as PackageJson;
+}
+
+function buildEnvironmentNames(declaration?: NaradaArtifactDeclaration): string[] {
+  const baseline = process.platform === "win32"
+    ? ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]
+    : ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"];
+  const declared = declaration?.build_environment_names ?? [];
+  if (
+    !Array.isArray(declared)
+    || declared.some((name) => typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
+  ) {
+    throw new ArtifactIntegrityError(
+      "artifact_declaration_invalid",
+      "build_environment_names must contain only valid environment variable names",
+    );
+  }
+  return [...new Set([...baseline, ...declared])].sort();
+}
+
+function buildEnvironment(environmentNames: readonly string[]): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of environmentNames) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+
+function declaredBuildDependencies(
+  packageName: string,
+  manifest: PackageJson,
+): string[] {
+  const dependencies = manifest.narada?.artifact?.build_dependencies ?? [];
+  if (
+    !Array.isArray(dependencies) ||
+    dependencies.some((dependency) => typeof dependency !== "string" || dependency.length === 0)
+  ) {
+    throw new ArtifactIntegrityError(
+      "artifact_declaration_invalid",
+      `Package ${packageName} has invalid narada.artifact.build_dependencies`,
+      { package_name: packageName },
+    );
+  }
+  const declaredDependencies = {
+    ...manifest.dependencies,
+    ...manifest.devDependencies,
+    ...manifest.optionalDependencies,
+    ...manifest.peerDependencies,
+  };
+  for (const dependency of dependencies) {
+    if (!(dependency in declaredDependencies)) {
+      throw new ArtifactIntegrityError(
+        "artifact_declaration_invalid",
+        `Package ${packageName} names undeclared build dependency ${dependency}`,
+        { package_name: packageName, build_dependency: dependency },
+      );
+    }
+  }
+  return [...new Set(dependencies)].sort();
 }
 
 function validateDeclaration(
@@ -101,7 +188,7 @@ export async function discoverWorkspacePackages(
   return packages;
 }
 
-async function collectSourceRoots(
+export async function collectSourceRoots(
   configuration: PackageArtifactConfiguration,
 ): Promise<SourceRoot[]> {
   const workspacePackages = await discoverWorkspacePackages(configuration.workspace_root);
@@ -120,12 +207,16 @@ async function collectSourceRoots(
           ? configuration.declaration.source_excludes
           : undefined,
     });
-    const dependencies = {
+    const runtimeDependencies = {
       ...manifest.dependencies,
       ...manifest.optionalDependencies,
       ...manifest.peerDependencies,
     };
-    for (const dependencyName of Object.keys(dependencies).sort()) {
+    const dependencyNames = new Set([
+      ...Object.keys(runtimeDependencies),
+      ...declaredBuildDependencies(packageName, manifest),
+    ]);
+    for (const dependencyName of [...dependencyNames].sort()) {
       const dependencyRoot = workspacePackages.get(dependencyName);
       if (dependencyRoot) await visit(dependencyName, dependencyRoot);
     }
@@ -157,12 +248,18 @@ export async function loadPackageArtifactConfiguration(input: {
   };
 }
 
-function run(command: string, args: string[], cwd: string): Promise<string> {
+function run(
+  command: string,
+  args: string[],
+  cwd: string,
+  environmentNames: readonly string[],
+): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
       shell: false,
       windowsHide: true,
+      env: buildEnvironment(environmentNames),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -196,20 +293,40 @@ export function createBuildRecipe(
   configuration: PackageArtifactConfiguration,
 ): ArtifactBuildRecipe {
   const command = "pnpm";
-  const args = ["--dir", configuration.package_root, "run", configuration.declaration.build_script];
+  const args = [
+    "--filter",
+    configuration.package_name,
+    "run",
+    configuration.declaration.build_script,
+  ];
+  const environmentNames = buildEnvironmentNames(configuration.declaration);
   const semantic = {
     schema: "narada.artifact.build_recipe.v1" as const,
     command,
     args,
-    environment_names: [] as string[],
+    environment_names: environmentNames,
+    deployment: {
+      command: "pnpm",
+      args: [
+        "--filter",
+        configuration.package_name,
+        "deploy",
+        "--prod",
+        "{deployment_root}",
+      ],
+      environment_names: environmentNames,
+      working_directory: ".",
+      materialization: "dereference_internal_links_v1" as const,
+    },
   };
   return { ...semantic, build_recipe_digest: semanticDigest(semantic) };
 }
 
 export async function captureToolchainEvidence(
   workspaceRoot: string,
+  environmentNames = buildEnvironmentNames(),
 ): Promise<ArtifactToolchainEvidence> {
-  const pnpmVersion = await run("pnpm", ["--version"], workspaceRoot);
+  const pnpmVersion = await run("pnpm", ["--version"], workspaceRoot, environmentNames);
   let lockfile: Uint8Array;
   try {
     lockfile = await readFile(join(workspaceRoot, "pnpm-lock.yaml"));
@@ -237,6 +354,98 @@ export interface CanonicalBuildInput {
   now?: () => Date;
 }
 
+const BUILD_STAGING_OWNER_SCHEMA = "narada.artifact_build_staging_owner.v1";
+const OWNED_STAGING_GRACE_MS = 60 * 60_000;
+const UNOWNED_STAGING_GRACE_MS = 60 * 60_000;
+
+type BuildStagingOwner = {
+  schema: typeof BUILD_STAGING_OWNER_SCHEMA;
+  pid: number;
+  created_at: string;
+  workspace_root: string;
+};
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+function parseBuildStagingOwner(value: unknown): BuildStagingOwner | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    record.schema !== BUILD_STAGING_OWNER_SCHEMA
+    || !Number.isSafeInteger(record.pid)
+    || Number(record.pid) <= 0
+    || typeof record.created_at !== "string"
+    || !Number.isFinite(Date.parse(record.created_at))
+    || typeof record.workspace_root !== "string"
+  ) {
+    return null;
+  }
+  return record as BuildStagingOwner;
+}
+
+export async function reapAbandonedBuildStaging(input: {
+  staging_root: string;
+  now?: () => Date;
+  is_process_alive?: (pid: number) => boolean;
+  owned_grace_ms?: number;
+  unowned_grace_ms?: number;
+}): Promise<string[]> {
+  const stagingRoot = resolve(input.staging_root);
+  const nowMs = (input.now ?? (() => new Date()))().getTime();
+  const isProcessAlive = input.is_process_alive ?? processIsAlive;
+  const ownedGraceMs = input.owned_grace_ms ?? OWNED_STAGING_GRACE_MS;
+  const unownedGraceMs = input.unowned_grace_ms ?? UNOWNED_STAGING_GRACE_MS;
+  const removed: string[] = [];
+  await mkdir(stagingRoot, { recursive: true });
+  const entries = await readdir(stagingRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!/^build-[A-Za-z0-9_-]+$/u.test(entry.name) || !entry.isDirectory()) continue;
+    const candidate = resolve(stagingRoot, entry.name);
+    if (dirname(candidate) !== stagingRoot) continue;
+    try {
+      const candidateStat = await lstat(candidate);
+      if (!candidateStat.isDirectory() || candidateStat.isSymbolicLink()) continue;
+
+      let owner: BuildStagingOwner | null = null;
+      try {
+        const ownerContent = await readFile(join(candidate, ".owner.json"), "utf8");
+        try {
+          owner = parseBuildStagingOwner(JSON.parse(ownerContent));
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+          // An interrupted marker write is treated as an unowned staging directory.
+        }
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+        // Legacy staging directories have no owner marker.
+      }
+      const ageMs = owner
+        ? nowMs - Date.parse(owner.created_at)
+        : nowMs - (await stat(candidate)).mtimeMs;
+      const graceMs = owner ? ownedGraceMs : unownedGraceMs;
+      if (ageMs < graceMs || (owner && isProcessAlive(owner.pid))) continue;
+      await rm(candidate, { recursive: true, force: true });
+      removed.push(candidate);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+  }
+  return removed.sort();
+}
+
 export async function canonicalBuild(
   input: CanonicalBuildInput,
 ): Promise<SealDeploymentResult> {
@@ -257,36 +466,76 @@ export async function canonicalBuild(
     roots: sourceRoots,
   });
   const recipe = createBuildRecipe(configuration);
-  const toolchain = await captureToolchainEvidence(configuration.workspace_root);
+  const toolchain = await captureToolchainEvidence(
+    configuration.workspace_root,
+    recipe.environment_names,
+  );
 
-  await run(recipe.command, recipe.args, configuration.workspace_root);
+  await run(
+    recipe.command,
+    recipe.args,
+    configuration.workspace_root,
+    recipe.environment_names,
+  );
 
-  const after = await captureSourceClosure({
+  const afterBuild = await captureSourceClosure({
     package_name: configuration.package_name,
     roots: sourceRoots,
   });
-  await assertSourceUnchanged(before, after);
+  await assertSourceUnchanged(before, afterBuild);
 
-  const stagingParent = await mkdtemp(join(tmpdir(), "narada-artifact-build-"));
+  const stagingRoot = join(configuration.workspace_root, ".ai", "runtime", ".artifact-build");
+  await mkdir(stagingRoot, { recursive: true });
+  await reapAbandonedBuildStaging({ staging_root: stagingRoot });
+  const stagingParent = await mkdtemp(join(stagingRoot, "build-"));
+  const stagingOwner: BuildStagingOwner = {
+    schema: BUILD_STAGING_OWNER_SCHEMA,
+    pid: process.pid,
+    created_at: new Date().toISOString(),
+    workspace_root: resolve(configuration.workspace_root),
+  };
+  await writeFile(
+    join(stagingParent, ".owner.json"),
+    `${JSON.stringify(stagingOwner, null, 2)}\n`,
+    "utf8",
+  );
+  const deployedRoot = join(stagingParent, "deployed");
   const deploymentRoot = join(stagingParent, "deployment");
   try {
     await run(
-      "pnpm",
-      ["--filter", configuration.package_name, "deploy", "--prod", deploymentRoot],
-      configuration.workspace_root,
+      recipe.deployment.command,
+      recipe.deployment.args.map((argument) =>
+        argument === "{deployment_root}"
+          ? deployedRoot
+          : argument),
+      resolve(configuration.workspace_root, recipe.deployment.working_directory),
+      recipe.deployment.environment_names,
     );
+    await materializeDeploymentTree(deployedRoot, deploymentRoot);
+    const afterDeployment = await captureSourceClosure({
+      package_name: configuration.package_name,
+      roots: sourceRoots,
+    });
+    await assertSourceUnchanged(before, afterDeployment);
     return await sealDeployment({
       store_root: input.store_root,
       deployment_root: deploymentRoot,
       package_name: configuration.package_name,
       artifact_profile: configuration.declaration.profile,
-      source_closure: before,
+      source_closure: afterDeployment,
       build_recipe: recipe,
       toolchain,
       entrypoints: configuration.declaration.entrypoints,
       compatibility: input.compatibility,
       fixed_dependencies: input.fixed_dependencies,
       platform_requirements: configuration.declaration.platform_requirements,
+      pre_publish_check: async () => {
+        const beforePublish = await captureSourceClosure({
+          package_name: configuration.package_name,
+          roots: sourceRoots,
+        });
+        await assertSourceUnchanged(before, beforePublish);
+      },
       now: input.now,
     });
   } finally {

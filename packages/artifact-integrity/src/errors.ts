@@ -1,12 +1,19 @@
 export type ArtifactIntegrityErrorCode =
   | "artifact_source_stale"
+  | "artifact_source_link_invalid"
+  | "artifact_source_link_external"
   | "artifact_closure_corrupt"
   | "artifact_channel_corrupt"
+  | "artifact_record_collision"
   | "artifact_build_inputs_changed"
   | "artifact_entrypoint_missing"
   | "artifact_binding_incompatible"
   | "artifact_declaration_invalid"
-  | "artifact_command_failed";
+  | "artifact_command_failed"
+  | "artifact_store_locked"
+  | "artifact_pin_corrupt"
+  | "artifact_lease_invalid"
+  | "artifact_lease_corrupt";
 
 export class ArtifactIntegrityError extends Error {
   readonly code: ArtifactIntegrityErrorCode;

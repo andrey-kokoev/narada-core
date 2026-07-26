@@ -1,6 +1,6 @@
-export const ARTIFACT_BUILD_RECEIPT_SCHEMA = "narada.artifact.build_receipt.v1" as const;
-export const ARTIFACT_CLOSURE_SCHEMA = "narada.artifact.closure.v1" as const;
-export const ARTIFACT_CHANNEL_SCHEMA = "narada.artifact.channel.v1" as const;
+export const ARTIFACT_BUILD_RECEIPT_SCHEMA = "narada.artifact.build_receipt.v2" as const;
+export const ARTIFACT_CLOSURE_SCHEMA = "narada.artifact.closure.v2" as const;
+export const ARTIFACT_CHANNEL_SCHEMA = "narada.artifact.channel.v2" as const;
 
 export type Sha256Digest = `sha256:${string}`;
 
@@ -24,6 +24,13 @@ export interface ArtifactBuildRecipe {
   command: string;
   args: string[];
   environment_names: string[];
+  deployment: {
+    command: string;
+    args: string[];
+    environment_names: string[];
+    working_directory: string;
+    materialization: "dereference_internal_links_v1";
+  };
   build_recipe_digest: Sha256Digest;
 }
 
@@ -55,6 +62,7 @@ export interface ArtifactClosure {
   schema: typeof ARTIFACT_CLOSURE_SCHEMA;
   package_name: string;
   artifact_profile: string;
+  compatibility_key: Sha256Digest;
   deployment_tree_digest: Sha256Digest;
   files: ArtifactTreeFile[];
   entrypoints: string[];
@@ -67,6 +75,7 @@ export interface ArtifactBuildReceipt {
   schema: typeof ARTIFACT_BUILD_RECEIPT_SCHEMA;
   package_name: string;
   artifact_profile: string;
+  compatibility_key: Sha256Digest;
   source_closure_digest: Sha256Digest;
   build_recipe_digest: Sha256Digest;
   toolchain_digest: Sha256Digest;
@@ -106,6 +115,8 @@ export interface NaradaArtifactDeclaration {
   profile: string;
   entrypoints: string[];
   build_script: string;
+  build_environment_names?: string[];
+  build_dependencies?: string[];
   source_excludes?: string[];
   fixed_dependencies?: Array<{
     role: string;
