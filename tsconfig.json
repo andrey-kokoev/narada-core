@@ -1,6 +1,8 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/task-governance-core" }
+    { "path": "./packages/artifact-integrity" },
+    { "path": "./packages/task-governance-core" },
+    { "path": "./packages/task-executability-orchestrator" }
   ]
 }

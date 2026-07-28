@@ -241,6 +241,13 @@ export function taskLifecycleDomainTools(): TaskLifecycleTool[] {
       request_id: stringSchema('Executability request id to complete.'),
       assessment: { type: 'object', additionalProperties: true, description: 'Task executability assessment payload matching narada.task_executability_assessment.v1.' },
     }, ['request_id', 'assessment'], { payloadRef: false })),
+    tool('task_lifecycle_executability_override', 'Admit one durable, one-shot operator-authorized override for one exact task dispatch fingerprint.', objectSchema({
+      task_number: numberSchema('Task number whose dispatch is being overridden.'),
+      agent_id: stringSchema('Agent or operator identity admitting the override.'),
+      reason: stringSchema('Reason for the one-shot override.'),
+      authority_basis: { type: 'object', additionalProperties: true, description: 'Durable authority basis with non-empty kind and summary.' },
+      dispatch_fingerprint: stringSchema('Optional exact dispatch fingerprint. Defaults to the current base environment fingerprint.'),
+    }, ['task_number', 'agent_id', 'reason', 'authority_basis'])),
     tool('task_lifecycle_executability_dispatch_check', 'Check whether a concrete dispatch is allowed to proceed based on the current assessment or a one-shot operator override.', objectSchema({
       task_number: numberSchema('Task number to check dispatch for.'),
       dispatch_fingerprint: stringSchema('Optional dispatch fingerprint; computed from task and environment if omitted.'),
