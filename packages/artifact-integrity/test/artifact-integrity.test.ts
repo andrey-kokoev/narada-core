@@ -33,6 +33,7 @@ import {
   type ArtifactCompatibility,
   type ArtifactToolchainEvidence,
 } from "../src/index.js";
+import { pathToFileURL } from "node:url";
 
 const temporaryRoots: string[] = [];
 
@@ -183,6 +184,66 @@ describe("canonical artifact integrity", () => {
     await expect(
       materializeDeploymentTree(deployment, join(root, "refused")),
     ).rejects.toMatchObject({ code: "artifact_closure_corrupt" });
+  });
+
+  it("preserves pnpm package links so dependency resolution keeps its topology", async () => {
+    const root = await temporaryRoot();
+    const deployment = join(root, "deployment");
+    const materialized = join(root, "materialized");
+    const packageRoot = join(
+      deployment,
+      "node_modules",
+      ".pnpm",
+      "package@1",
+      "node_modules",
+      "package",
+    );
+    const dependencyRoot = join(
+      deployment,
+      "node_modules",
+      ".pnpm",
+      "dependency@1",
+      "node_modules",
+      "dependency",
+    );
+    const nativePackageRoot = join(
+      deployment,
+      "node_modules",
+      ".pnpm",
+      "native-package@1",
+      "node_modules",
+      "native-package",
+    );
+    await mkdir(packageRoot, { recursive: true });
+    await mkdir(dependencyRoot, { recursive: true });
+    await mkdir(join(nativePackageRoot, "native"), { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), '{"type":"module"}\n');
+    await writeFile(join(packageRoot, "index.js"), "export { value } from 'dependency';\n");
+    await writeFile(join(dependencyRoot, "index.js"), "export const value = 'sealed';\n");
+    await symlink(
+      packageRoot,
+      join(deployment, "node_modules", "package"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await symlink(
+      dependencyRoot,
+      join(packageRoot, "..", "dependency"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await symlink(
+      nativePackageRoot,
+      join(deployment, "node_modules", "native-package"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await materializeDeploymentTree(deployment, materialized);
+
+    expect((await lstat(join(materialized, "node_modules", "package"))).isSymbolicLink()).toBe(true);
+    const loaded = await import(pathToFileURL(
+      join(materialized, "node_modules", "package", "index.js"),
+    ).href);
+    expect(loaded.value).toBe("sealed");
+    expect((await lstat(join(materialized, "node_modules", "native-package"))).isSymbolicLink()).toBe(false);
   });
 
   it("reaps only abandoned artifact-build staging directories", async () => {

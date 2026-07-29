@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, readFile, readlink, realpath } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { sha256Bytes, semanticDigest } from "./canonical.js";
 import type {
@@ -246,6 +246,54 @@ async function assertDeploymentLinksInternal(root: string): Promise<void> {
   await visit(absoluteRoot);
 }
 
+async function restorePnpmPackageLinks(from: string, to: string): Promise<void> {
+  const sourceNodeModules = join(from, "node_modules");
+  const targetNodeModules = join(to, "node_modules");
+  const sourcePnpmRoot = join(sourceNodeModules, ".pnpm");
+
+  async function visit(root: string, targetRoot: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const sourceEntry = join(root, entry.name);
+      const targetEntry = join(targetRoot, entry.name);
+      if (entry.name.startsWith("@") && entry.isDirectory()) {
+        await visit(sourceEntry, targetEntry);
+        continue;
+      }
+      if (!(await lstat(sourceEntry)).isSymbolicLink()) continue;
+      const resolvedTarget = await realpath(sourceEntry);
+      if (!pathInside(sourcePnpmRoot, resolvedTarget)) continue;
+      let hasNativeAssets = false;
+      try {
+        hasNativeAssets = (await lstat(join(resolvedTarget, "native"))).isDirectory();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (hasNativeAssets) continue;
+      const relativeTarget = relative(
+        dirname(targetEntry),
+        join(targetNodeModules, relative(sourceNodeModules, resolvedTarget)),
+      );
+      await rm(targetEntry, { recursive: true, force: true });
+      await mkdir(dirname(targetEntry), { recursive: true });
+      await symlink(
+        relativeTarget,
+        targetEntry,
+        "dir",
+      );
+    }
+  }
+
+  await visit(sourceNodeModules, targetNodeModules);
+}
+
 export async function materializeDeploymentTree(from: string, to: string): Promise<void> {
   await assertDeploymentLinksInternal(from);
   await mkdir(dirname(to), { recursive: true });
@@ -256,4 +304,5 @@ export async function materializeDeploymentTree(from: string, to: string): Promi
     preserveTimestamps: false,
     dereference: true,
   });
+  await restorePnpmPackageLinks(from, to);
 }
