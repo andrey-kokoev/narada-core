@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,20 +33,54 @@ function source(overrides = {}) {
   const immutable = overrides.immutable_source_id ?? 'message-1';
   return {
     source_kind: 'mailbox_message',
-    source_scope: 'help@global-maxima.com',
+    source_scope: 'help-global-maxima',
     immutable_source_id: immutable,
     idempotency_key: `admit:${immutable}`,
     causation_id: `sync:${immutable}`,
     policy_version: 'admission-v1',
     summary: `Message ${immutable}`,
-    source_ref: { mailbox_id: 'help@global-maxima.com', message_id: immutable },
+    source_ref: {
+      scope_id: 'help-global-maxima',
+      mailbox_id: 'help@global-maxima.com',
+      message_id: immutable,
+    },
     correlation_keys: [{
       kind: 'conversation_id',
-      scope: 'help@global-maxima.com',
+      scope: 'help-global-maxima',
       value: overrides.conversation ?? 'conversation-1',
     }],
     ...overrides,
   };
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, nested]) => [key, canonicalize(nested)]));
+}
+
+function receiptDigest(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex');
+}
+
+function tableCount(store, table) {
+  return Number(store.db.prepare(`select count(*) as count from ${table}`).get().count);
+}
+
+function injectOutboxAbort(store) {
+  store.db.exec(`
+    create trigger injected_work_outbox_abort
+    before insert on work_outbox
+    begin
+      select raise(abort, 'injected_work_transaction_abort');
+    end;
+  `);
+}
+
+function clearOutboxAbort(store) {
+  store.db.exec('drop trigger injected_work_outbox_abort;');
 }
 
 test('source admission is canonical, idempotent, and fenced to one writer', () => {
@@ -111,6 +146,10 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
         payload_ref text not null
       );
       insert into directive_extension_records values ('directive-1', 'legacy-task-1', 'artifact:1');
+      create table directive_outcomes (outcome_id text primary key, evidence_json text not null);
+      insert into directive_outcomes values ('legacy-outcome', 'large legacy outcome');
+      create table directive_outcome_latest (directive_id text primary key, outcome_id text not null);
+      insert into directive_outcome_latest values ('legacy-directive', 'legacy-outcome');
       create table site_loop_runs (run_id text primary key, transcript text not null);
       insert into site_loop_runs values ('legacy-loop-run', 'large legacy payload');
     `);
@@ -158,10 +197,11 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
     assert.equal(report.source_integrity_scope, 'copied_tables_only');
     assert.equal(report.source_integrity_tables.includes('task_lifecycle'), true);
     assert.equal(report.source_integrity_tables.includes('site_loop_runs'), false);
-    assert.deepEqual(report.excluded_legacy_tables, [{
-      table: 'site_loop_runs',
-      disposition: 'discarded_without_scan',
-    }]);
+    assert.deepEqual(report.excluded_legacy_tables, [
+      { table: 'directive_outcome_latest', disposition: 'discarded_without_scan' },
+      { table: 'directive_outcomes', disposition: 'discarded_without_scan' },
+      { table: 'site_loop_runs', disposition: 'discarded_without_scan' },
+    ]);
     assert.equal(report.ticket_mappings.length, 2);
     assert.equal(existsSync(sourcePath), true, 'source is retained until the caller verifies and deletes it');
     assert.equal(existsSync(`${targetPath}-wal`), false, 'migration leaves a self-contained promotable database');
@@ -176,6 +216,8 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
       assert.equal(migrated.db.prepare('select count(*) as count from task_specs').get().count, 1);
       assert.equal(migrated.db.prepare('select count(*) as count from directive_extension_records').get().count, 1);
       assert.equal(migrated.db.prepare("select count(*) as count from sqlite_master where type = 'table' and name = 'site_loop_runs'").get().count, 0);
+      assert.equal(migrated.db.prepare("select count(*) as count from sqlite_master where type = 'table' and name = 'directive_outcomes'").get().count, 0);
+      assert.equal(migrated.db.prepare("select count(*) as count from sqlite_master where type = 'table' and name = 'directive_outcome_latest'").get().count, 0);
       assert.deepEqual(migrated.listTickets().map((ticket) => ticket.status).sort(), ['actionable', 'blocked']);
       assert.equal(migrated.listOutbox('scheduler', { topics: ['work.ticket-work-due.v1'] }).length, 1);
     } finally {
@@ -208,8 +250,8 @@ test('trusted correlation attaches and ambiguity blocks without association', ()
       immutable_source_id: 'message-4',
       idempotency_key: 'admit:message-4',
       correlation_keys: [
-        { kind: 'conversation_id', scope: 'help@global-maxima.com', value: 'conversation-1' },
-        { kind: 'conversation_id', scope: 'help@global-maxima.com', value: 'conversation-2' },
+        { kind: 'conversation_id', scope: 'help-global-maxima', value: 'conversation-1' },
+        { kind: 'conversation_id', scope: 'help-global-maxima', value: 'conversation-2' },
       ],
     }));
     assert.equal(ambiguous.status, 'blocked');
@@ -329,6 +371,7 @@ test('stale proposals fail closed and newer evidence supersedes draft claims', (
       },
     });
     assert.match(claim.draft_operation_key, /^draft_operation_/);
+    assert.equal(claim.mailbox_id, 'help@global-maxima.com');
     const newer = f.store.admitSource(source({
       immutable_source_id: 'message-newer',
       idempotency_key: 'admit:message-newer',
@@ -349,6 +392,215 @@ test('stale proposals fail closed and newer evidence supersedes draft claims', (
     assert.equal(receipt.ticket.revision, newer.ticket_revision);
   } finally {
     f.close();
+  }
+});
+
+test('Graph-backed draft disposition is linkage-checked, idempotent, and reactivates once', () => {
+  const f = fixture();
+  try {
+    const admitted = f.store.admitSource(source());
+    const claim = f.store.admitProposal({
+      ticket_id: admitted.ticket_id,
+      expected_revision: admitted.ticket_revision,
+      route: 'response_draft',
+      idempotency_key: 'proposal:draft:disposition',
+      causation_id: admitted.event_id,
+      actor_id: 'agent-test',
+      summary: 'Prepare a reply for operator disposition.',
+      draft: {
+        source_id: admitted.source_id,
+        reply_mode: 'reply',
+        body_text: 'Controlled reply.',
+      },
+    });
+    const draftId = 'draft-disposition-1';
+    f.store.recordDraftReceipt({
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: claim.effect_claim_id,
+      draft_operation_key: claim.draft_operation_key,
+      draft_request_digest: claim.draft_request_digest,
+      receipt_id: 'graph-create-receipt-1',
+      draft_id: draftId,
+      draft_ref: {
+        draft_id: draftId,
+        effect_claim_id: claim.effect_claim_id,
+        draft_operation_key: claim.draft_operation_key,
+        mailbox_id: claim.mailbox_id,
+      },
+      idempotency_key: 'record-draft-receipt:disposition',
+      causation_id: 'graph-create-receipt-1',
+    });
+    const observationId = 'graph_draft_disposition_controlled';
+    const unsignedEvidence = {
+      schema: 'narada.graph_mail.ticket_draft_disposition_receipt.v1',
+      observation_id: observationId,
+      evidence_kind: 'synchronized_graph_observation',
+      evidence_id: observationId,
+      disposition: 'sent',
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: claim.effect_claim_id,
+      draft_operation_key: claim.draft_operation_key,
+      mailbox_id: claim.mailbox_id,
+      draft_id: draftId,
+      observed_message_id: draftId,
+      is_draft: false,
+      observed_at: '2026-07-31T15:00:00.000Z',
+    };
+    const evidence = { ...unsignedEvidence, receipt_sha256: receiptDigest(unsignedEvidence) };
+    const input = {
+      ticket_id: admitted.ticket_id,
+      draft_id: draftId,
+      evidence,
+      idempotency_key: `draft-disposition:${observationId}`,
+      causation_id: observationId,
+    };
+    const reconciled = f.store.reconcileDraftDisposition(input);
+    assert.equal(reconciled.status, 'reconciled');
+    assert.equal(reconciled.ticket.status, 'actionable');
+    assert.equal(f.store.reconcileDraftDisposition(input).status, 'already_reconciled');
+    const shown = f.store.loadTicketProcessingContext({
+      ticket_id: admitted.ticket_id,
+      triggering_event_id: reconciled.event_id,
+      idempotency_key: 'context:draft-disposition',
+    });
+    assert.equal(shown.draft_refs[0].disposition, 'sent');
+    assert.deepEqual(shown.draft_refs[0].disposition_evidence, evidence);
+    assert.equal(f.store.listOutbox('scheduler-test', {
+      topics: ['work.ticket-work-due.v1'],
+    }).filter((event) => event.aggregate_id === admitted.ticket_id).length, 2);
+    assert.throws(() => f.store.reconcileDraftDisposition({
+      ...input,
+      idempotency_key: 'draft-disposition:tampered',
+      evidence: { ...evidence, mailbox_id: 'other@example.test' },
+    }), /receipt_digest_mismatch/);
+  } finally {
+    f.close();
+  }
+});
+
+test('each required multi-row Work transaction rolls back at its outbox commit boundary', () => {
+  {
+    const f = fixture();
+    try {
+      injectOutboxAbort(f.store);
+      assert.throws(() => f.store.admitSource(source()), /injected_work_transaction_abort/);
+      clearOutboxAbort(f.store);
+      assert.equal(tableCount(f.store, 'tickets'), 0);
+      assert.equal(tableCount(f.store, 'ticket_sources'), 0);
+      assert.equal(tableCount(f.store, 'work_lifecycle_events'), 0);
+      assert.equal(tableCount(f.store, 'work_outbox'), 0);
+      assert.equal(tableCount(f.store, 'work_operations'), 0);
+    } finally {
+      f.close();
+    }
+  }
+
+  {
+    const f = fixture();
+    try {
+      const admitted = f.store.admitSource(source());
+      const baseline = {
+        revision: f.store.getTicket(admitted.ticket_id).revision,
+        tasks: tableCount(f.store, 'task_lifecycle'),
+        links: tableCount(f.store, 'ticket_task_links'),
+        events: tableCount(f.store, 'work_lifecycle_events'),
+        outbox: tableCount(f.store, 'work_outbox'),
+      };
+      injectOutboxAbort(f.store);
+      assert.throws(() => f.store.admitProposal({
+        ticket_id: admitted.ticket_id,
+        expected_revision: admitted.ticket_revision,
+        route: 'followup_task',
+        idempotency_key: 'proposal:task:transaction-abort',
+        causation_id: admitted.event_id,
+        actor_id: 'agent-test',
+        summary: 'This proposal must roll back.',
+        task: {
+          title: 'Rolled-back task',
+          goal: 'Prove rollback.',
+          required_work: 'Reach the injected outbox boundary.',
+          acceptance_criteria: ['No partial task or link remains.'],
+        },
+      }), /injected_work_transaction_abort/);
+      clearOutboxAbort(f.store);
+      assert.equal(f.store.getTicket(admitted.ticket_id).revision, baseline.revision);
+      assert.equal(tableCount(f.store, 'task_lifecycle'), baseline.tasks);
+      assert.equal(tableCount(f.store, 'ticket_task_links'), baseline.links);
+      assert.equal(tableCount(f.store, 'work_lifecycle_events'), baseline.events);
+      assert.equal(tableCount(f.store, 'work_outbox'), baseline.outbox);
+    } finally {
+      f.close();
+    }
+  }
+
+  {
+    const f = fixture();
+    try {
+      const admitted = f.store.admitSource(source());
+      const proposal = f.store.admitProposal({
+        ticket_id: admitted.ticket_id,
+        expected_revision: admitted.ticket_revision,
+        route: 'followup_task',
+        idempotency_key: 'proposal:task:terminal-abort',
+        causation_id: admitted.event_id,
+        actor_id: 'agent-test',
+        summary: 'Create task before terminal fault.',
+        task: {
+          title: 'Terminal rollback task',
+          goal: 'Prove terminal rollback.',
+          required_work: 'Attempt a terminal transition.',
+          acceptance_criteria: ['Task and ticket remain unchanged after abort.'],
+        },
+      });
+      const taskBefore = f.store.taskStore.getLifecycle(proposal.task_id);
+      const ticketBefore = f.store.getTicket(admitted.ticket_id);
+      const eventCount = tableCount(f.store, 'work_lifecycle_events');
+      const outboxCount = tableCount(f.store, 'work_outbox');
+      injectOutboxAbort(f.store);
+      assert.throws(() => f.store.taskStore.updateStatus(proposal.task_id, 'closed', 'test', {
+        closed_at: new Date().toISOString(),
+        closed_by: 'test',
+      }), /injected_work_transaction_abort/);
+      clearOutboxAbort(f.store);
+      const taskAfter = f.store.taskStore.getLifecycle(proposal.task_id);
+      const ticketAfter = f.store.getTicket(admitted.ticket_id);
+      assert.equal(taskAfter.status, taskBefore.status);
+      assert.equal(taskAfter.revision, taskBefore.revision);
+      assert.equal(ticketAfter.status, ticketBefore.status);
+      assert.equal(ticketAfter.revision, ticketBefore.revision);
+      assert.equal(tableCount(f.store, 'work_lifecycle_events'), eventCount);
+      assert.equal(tableCount(f.store, 'work_outbox'), outboxCount);
+    } finally {
+      f.close();
+    }
+  }
+
+  {
+    const f = fixture();
+    try {
+      const admitted = f.store.admitSource(source());
+      const eventCount = tableCount(f.store, 'work_lifecycle_events');
+      const outboxCount = tableCount(f.store, 'work_outbox');
+      injectOutboxAbort(f.store);
+      assert.throws(() => f.store.admitProposal({
+        ticket_id: admitted.ticket_id,
+        expected_revision: admitted.ticket_revision,
+        route: 'resolved',
+        idempotency_key: 'proposal:resolved:transaction-abort',
+        causation_id: admitted.event_id,
+        actor_id: 'agent-test',
+        summary: 'Resolution must roll back.',
+        resolution_code: 'answered',
+      }), /injected_work_transaction_abort/);
+      clearOutboxAbort(f.store);
+      const ticket = f.store.getTicket(admitted.ticket_id);
+      assert.equal(ticket.status, 'actionable');
+      assert.equal(ticket.revision, admitted.ticket_revision);
+      assert.equal(tableCount(f.store, 'work_lifecycle_events'), eventCount);
+      assert.equal(tableCount(f.store, 'work_outbox'), outboxCount);
+    } finally {
+      f.close();
+    }
   }
 });
 

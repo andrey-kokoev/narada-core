@@ -107,8 +107,13 @@ function tableColumns(db: Db, table: string): Array<{
     }));
 }
 
+const LEGACY_SITE_LOOP_TABLES = new Set([
+  'directive_outcome_latest',
+  'directive_outcomes',
+]);
+
 function isLegacySiteLoopTable(table: string): boolean {
-  return table.startsWith('site_loop_');
+  return table.startsWith('site_loop_') || LEGACY_SITE_LOOP_TABLES.has(table);
 }
 
 function ensureTaskAggregateRevisionTriggers(db: Db): void {
@@ -208,6 +213,50 @@ function assertReferencePayload(value: Record<string, unknown>, field: string): 
   };
   inspect(value, field);
   return assertBounded(canonicalJson(value), field, MAX_REF_JSON_BYTES);
+}
+
+function normalizeDraftDispositionEvidence(
+  input: ReconcileDraftDispositionInput['evidence'],
+): ReconcileDraftDispositionInput['evidence'] & { evidence_json: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('ticket_draft_disposition_evidence_required');
+  }
+  if (input.schema !== 'narada.graph_mail.ticket_draft_disposition_receipt.v1') {
+    throw new Error('ticket_draft_disposition_evidence_schema_invalid');
+  }
+  if (input.evidence_kind !== 'synchronized_graph_observation') {
+    throw new Error('ticket_draft_disposition_evidence_kind_invalid');
+  }
+  if (input.disposition !== 'sent' || input.is_draft !== false) {
+    throw new Error('ticket_draft_disposition_evidence_state_invalid');
+  }
+  const normalized = {
+    ...input,
+    observation_id: assertNonEmpty(input.observation_id, 'draft_disposition_observation_id'),
+    evidence_id: assertNonEmpty(input.evidence_id, 'draft_disposition_evidence_id'),
+    ticket_id: assertNonEmpty(input.ticket_id, 'draft_disposition_evidence_ticket_id'),
+    effect_claim_id: assertNonEmpty(input.effect_claim_id, 'draft_disposition_effect_claim_id'),
+    draft_operation_key: assertNonEmpty(input.draft_operation_key, 'draft_disposition_operation_key'),
+    mailbox_id: assertNonEmpty(input.mailbox_id, 'draft_disposition_mailbox_id'),
+    draft_id: assertNonEmpty(input.draft_id, 'draft_disposition_evidence_draft_id'),
+    observed_message_id: assertNonEmpty(input.observed_message_id, 'draft_disposition_message_id'),
+    observed_at: assertNonEmpty(input.observed_at, 'draft_disposition_observed_at'),
+    receipt_sha256: assertNonEmpty(input.receipt_sha256, 'draft_disposition_receipt_sha256'),
+  };
+  if (normalized.observation_id !== normalized.evidence_id) {
+    throw new Error('ticket_draft_disposition_evidence_identity_mismatch');
+  }
+  if (!/^[a-f0-9]{64}$/.test(normalized.receipt_sha256)) {
+    throw new Error('ticket_draft_disposition_receipt_sha256_invalid');
+  }
+  const { receipt_sha256: _receiptSha256, ...unsignedReceipt } = normalized;
+  if (digest(unsignedReceipt) !== normalized.receipt_sha256) {
+    throw new Error('ticket_draft_disposition_receipt_digest_mismatch');
+  }
+  return {
+    ...normalized,
+    evidence_json: assertReferencePayload(normalized, 'draft_disposition_evidence'),
+  };
 }
 
 function ticketFromRow(row: SqlRow): TicketRow {
@@ -353,6 +402,8 @@ function initializeWorkSchema(db: Db): void {
       disposition text,
       disposition_evidence_kind text,
       disposition_evidence_id text,
+      disposition_evidence_json text
+        check (disposition_evidence_json is null or length(cast(disposition_evidence_json as blob)) <= ${MAX_REF_JSON_BYTES}),
       created_at text not null,
       disposed_at text,
       primary key(ticket_id, draft_id)
@@ -571,8 +622,10 @@ function hasWorkSchema(db: Db): boolean {
     'select schema_version from work_lifecycle_meta where singleton = 1',
   ).get() as SqlRow | undefined;
   if (Number(meta?.schema_version) !== WORK_LIFECYCLE_SCHEMA_VERSION) return false;
-  const columns = db.prepare('pragma table_info(task_lifecycle)').all() as SqlRow[];
-  return columns.some((column) => String(column.name) === 'revision');
+  const taskColumns = db.prepare('pragma table_info(task_lifecycle)').all() as SqlRow[];
+  const draftColumns = db.prepare('pragma table_info(ticket_draft_refs)').all() as SqlRow[];
+  return taskColumns.some((column) => String(column.name) === 'revision')
+    && draftColumns.some((column) => String(column.name) === 'disposition_evidence_json');
 }
 
 export function resolveWorkLifecycleDatabasePath(
@@ -1131,6 +1184,7 @@ export class WorkLifecycleStore {
       const draftRows = this.db.prepare(`
         select ticket_id, draft_id, effect_claim_id, draft_ref_json, receipt_id,
                disposition, disposition_evidence_kind, disposition_evidence_id,
+               disposition_evidence_json,
                created_at, disposed_at
           from ticket_draft_refs where ticket_id = ?
          order by created_at, draft_id limit 51
@@ -1170,6 +1224,9 @@ export class WorkLifecycleStore {
         disposition_evidence_id: row.disposition_evidence_id === null
           ? null
           : String(row.disposition_evidence_id),
+        disposition_evidence: row.disposition_evidence_json === null
+          ? null
+          : parseJsonObject(row.disposition_evidence_json),
         created_at: String(row.created_at),
         disposed_at: row.disposed_at === null ? null : String(row.disposed_at),
       }));
@@ -1475,18 +1532,25 @@ export class WorkLifecycleStore {
         `).get(before.ticket_id, draft.source_id) as SqlRow | undefined;
         if (!source) throw new Error('ticket_proposal_draft_source_invalid');
         const sourceRef = parseJsonObject(source.source_ref_json);
-        const mailboxId = assertNonEmpty(
+        const sourceScope = assertNonEmpty(
           typeof source.source_scope === 'string' ? source.source_scope : '',
-          'ticket_draft_mailbox_id',
+          'ticket_draft_source_scope',
+        );
+        const sourceRefScope = assertNonEmpty(
+          typeof sourceRef.scope_id === 'string' ? sourceRef.scope_id : '',
+          'ticket_draft_source_ref_scope_id',
+        );
+        if (sourceRefScope !== sourceScope) {
+          throw new Error('ticket_draft_source_scope_mismatch');
+        }
+        const mailboxId = assertNonEmpty(
+          typeof sourceRef.mailbox_id === 'string' ? sourceRef.mailbox_id : '',
+          'ticket_draft_graph_mailbox_id',
         );
         const sourceMessageId = assertNonEmpty(
           typeof sourceRef.message_id === 'string' ? sourceRef.message_id : '',
           'ticket_draft_source_message_id',
         );
-        if (
-          sourceRef.mailbox_id !== undefined
-          && String(sourceRef.mailbox_id) !== mailboxId
-        ) throw new Error('ticket_draft_source_mailbox_mismatch');
         if (String(source.immutable_source_id) !== sourceMessageId) {
           throw new Error('ticket_draft_source_identity_mismatch');
         }
@@ -1744,16 +1808,18 @@ export class WorkLifecycleStore {
     ticket: TicketRow;
     event_id: string;
   } {
+    const evidence = normalizeDraftDispositionEvidence(input.evidence);
+    if (evidence.ticket_id !== input.ticket_id || evidence.draft_id !== input.draft_id) {
+      throw new Error('ticket_draft_disposition_evidence_target_mismatch');
+    }
     const normalized = {
       ...input,
       ticket_id: assertNonEmpty(input.ticket_id, 'ticket_id'),
       draft_id: assertNonEmpty(input.draft_id, 'draft_id'),
-      disposition: assertBounded(
-        assertNonEmpty(input.disposition, 'disposition'),
-        'disposition',
-        256,
-      ),
-      evidence_id: assertNonEmpty(input.evidence_id, 'evidence_id'),
+      disposition: evidence.disposition,
+      evidence_kind: evidence.evidence_kind,
+      evidence_id: evidence.evidence_id,
+      evidence,
       idempotency_key: assertNonEmpty(input.idempotency_key, 'idempotency_key'),
       causation_id: assertNonEmpty(input.causation_id, 'causation_id'),
     };
@@ -1770,18 +1836,26 @@ export class WorkLifecycleStore {
         'select * from ticket_draft_refs where ticket_id = ? and draft_id = ?',
       ).get(normalized.ticket_id, normalized.draft_id) as SqlRow | undefined;
       if (!draft) throw new Error('ticket_draft_ref_not_found');
+      const draftRef = parseJsonObject(draft.draft_ref_json);
+      if (
+        String(draft.effect_claim_id) !== evidence.effect_claim_id
+        || String(draftRef.draft_operation_key ?? '') !== evidence.draft_operation_key
+        || String(draftRef.mailbox_id ?? '') !== evidence.mailbox_id
+      ) throw new Error('ticket_draft_disposition_evidence_linkage_mismatch');
       const now = this.#now().toISOString();
       this.db.prepare(`
         update ticket_draft_refs
            set disposition = ?,
-               disposition_evidence_kind = ?,
-               disposition_evidence_id = ?,
-               disposed_at = ?
+                disposition_evidence_kind = ?,
+                disposition_evidence_id = ?,
+                disposition_evidence_json = ?,
+                disposed_at = ?
          where ticket_id = ? and draft_id = ?
       `).run(
         normalized.disposition,
         normalized.evidence_kind,
         normalized.evidence_id,
+        evidence.evidence_json,
         now,
         normalized.ticket_id,
         normalized.draft_id,

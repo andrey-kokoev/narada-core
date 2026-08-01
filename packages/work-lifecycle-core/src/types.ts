@@ -1,4 +1,4 @@
-export const WORK_LIFECYCLE_SCHEMA_VERSION = 1 as const;
+export const WORK_LIFECYCLE_SCHEMA_VERSION = 2 as const;
 export const WORK_LIFECYCLE_DATABASE_PATH = '.ai/work-lifecycle.db' as const;
 
 export type TicketStatus =
@@ -160,9 +160,23 @@ export interface TicketProcessingContextResult {
 export interface ReconcileDraftDispositionInput {
   ticket_id: string;
   draft_id: string;
-  disposition: string;
-  evidence_kind: 'graph_operation_receipt' | 'synchronized_graph_observation';
-  evidence_id: string;
+  evidence: {
+    schema: 'narada.graph_mail.ticket_draft_disposition_receipt.v1';
+    observation_id: string;
+    evidence_kind: 'synchronized_graph_observation';
+    evidence_id: string;
+    disposition: 'sent';
+    ticket_id: string;
+    effect_claim_id: string;
+    draft_operation_key: string;
+    mailbox_id: string;
+    draft_id: string;
+    observed_message_id: string;
+    is_draft: false;
+    observed_at: string;
+    receipt_sha256: string;
+    [key: string]: unknown;
+  };
   idempotency_key: string;
   causation_id: string;
 }
