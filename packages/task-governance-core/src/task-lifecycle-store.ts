@@ -1398,6 +1398,30 @@ export function openPreparedTaskLifecycleStore(
   cwd: string,
   options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'> = {},
 ): SqliteTaskLifecycleStore {
+  return openValidatedExistingTaskLifecycleStore(cwd, options, false);
+}
+
+/**
+ * Open a fenced pre-preparation lifecycle store for one-way migration.
+ *
+ * Historical Task Lifecycle runtimes created the complete current schema but
+ * did not stamp `user_version`. Hard cutover must be able to read that exact
+ * state without weakening the runtime opener or mutating the source metadata.
+ * This opener therefore accepts only the current schema at version 0 or the
+ * current prepared version. It must never be used by an MCP startup path.
+ */
+export function openLegacyTaskLifecycleStoreForMigration(
+  cwd: string,
+  options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'> = {},
+): SqliteTaskLifecycleStore {
+  return openValidatedExistingTaskLifecycleStore(cwd, options, true);
+}
+
+function openValidatedExistingTaskLifecycleStore(
+  cwd: string,
+  options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'>,
+  allowUnversionedCurrentSchema: boolean,
+): SqliteTaskLifecycleStore {
   const runtime = selectSqliteRuntime();
   assertSqliteRuntimeSupported(runtime);
   const dbPath = resolveTaskLifecycleDatabasePath(cwd, options.databasePath);
@@ -1432,7 +1456,10 @@ export function openPreparedTaskLifecycleStore(
       throw new Error('task_lifecycle_store_not_prepared:schema');
     }
     const schemaVersion = Number(db.pragma('user_version') ?? 0);
-    if (schemaVersion !== TASK_LIFECYCLE_SCHEMA_VERSION) {
+    if (
+      schemaVersion !== TASK_LIFECYCLE_SCHEMA_VERSION
+      && !(allowUnversionedCurrentSchema && schemaVersion === 0)
+    ) {
       throw new Error(`task_lifecycle_store_not_prepared:schema_version_${schemaVersion}`);
     }
     return new SqliteTaskLifecycleStore({ db });

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
   inspectPreparedTaskLifecycleStore,
+  openLegacyTaskLifecycleStoreForMigration,
   openPreparedTaskLifecycleStore,
   prepareTaskLifecycleStore,
   resolveTaskLifecycleDatabasePath,
@@ -754,11 +755,14 @@ export function migrateLegacyTaskLifecycleToWorkLifecycle(
   const sourceInspection = inspectPreparedTaskLifecycleStore(siteRoot, {
     databasePath: sourceDatabasePath,
   });
-  if (sourceInspection.status !== 'prepared') {
+  const sourceIsUnversionedCurrentSchema = sourceInspection.status === 'stale'
+    && sourceInspection.schema_version === 0
+    && sourceInspection.reason === 'task_lifecycle_store_not_prepared:schema_version_0';
+  if (sourceInspection.status !== 'prepared' && !sourceIsUnversionedCurrentSchema) {
     throw new Error(`work_lifecycle_migration_source_not_prepared:${sourceInspection.reason ?? sourceInspection.status}`);
   }
 
-  const sourceStore = openPreparedTaskLifecycleStore(siteRoot, {
+  const sourceStore = openLegacyTaskLifecycleStoreForMigration(siteRoot, {
     databasePath: sourceDatabasePath,
   });
   const targetStore = prepareTaskLifecycleStore(siteRoot, {

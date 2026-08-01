@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   openTaskLifecycleStore,
+  openLegacyTaskLifecycleStoreForMigration,
   openPreparedTaskLifecycleStore,
   prepareTaskLifecycleStore,
   inspectPreparedTaskLifecycleStore,
@@ -150,6 +151,27 @@ describe('SqliteTaskLifecycleStore', () => {
         schema_version: 0,
       });
       expect(() => openPreparedTaskLifecycleStore(tempDir!)).toThrow('schema_version_0');
+    });
+
+    it('opens a structurally current unversioned store only for one-way migration without stamping it', async () => {
+      tempDir = await mkdtemp(join(tmpdir(), 'narada-lifecycle-store-legacy-migration-'));
+      await mkdir(join(tempDir, '.ai'), { recursive: true });
+
+      const prepared = prepareTaskLifecycleStore(tempDir);
+      prepared.db.pragma('user_version = 0');
+      prepared.db.close();
+
+      expect(() => openPreparedTaskLifecycleStore(tempDir!)).toThrow('schema_version_0');
+      const migrationSource = openLegacyTaskLifecycleStoreForMigration(tempDir);
+      try {
+        expect(Number(migrationSource.db.pragma('user_version'))).toBe(0);
+      } finally {
+        migrationSource.db.close();
+      }
+      expect(inspectPreparedTaskLifecycleStore(tempDir)).toMatchObject({
+        status: 'stale',
+        schema_version: 0,
+      });
     });
 
     it('reports an existing non-SQLite file as an invalid prepared store', async () => {

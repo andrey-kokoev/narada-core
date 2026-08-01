@@ -4,7 +4,10 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { prepareTaskLifecycleStore } from '@narada-core/task-governance-core/task-lifecycle-store';
+import {
+  openLegacyTaskLifecycleStoreForMigration,
+  prepareTaskLifecycleStore,
+} from '@narada-core/task-governance-core/task-lifecycle-store';
 import {
   migrateLegacyTaskLifecycleToWorkLifecycle,
   openPreparedWorkLifecycleStore,
@@ -153,6 +156,9 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
       create table site_loop_runs (run_id text primary key, transcript text not null);
       insert into site_loop_runs values ('legacy-loop-run', 'large legacy payload');
     `);
+    // Pre-preparation Task Lifecycle runtimes created the current schema but
+    // left user_version at 0. This is the actual hard-cutover source shape.
+    legacy.db.pragma('user_version = 0');
   } finally {
     legacy.db.close();
   }
@@ -204,6 +210,12 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
     ]);
     assert.equal(report.ticket_mappings.length, 2);
     assert.equal(existsSync(sourcePath), true, 'source is retained until the caller verifies and deletes it');
+    const unchangedSource = openLegacyTaskLifecycleStoreForMigration(root, { databasePath: sourcePath });
+    try {
+      assert.equal(Number(unchangedSource.db.pragma('user_version')), 0, 'migration does not stamp the legacy source');
+    } finally {
+      unchangedSource.db.close();
+    }
     assert.equal(existsSync(`${targetPath}-wal`), false, 'migration leaves a self-contained promotable database');
     assert.equal(existsSync(`${targetPath}-shm`), false, 'migration leaves no shared-memory sidecar');
 
