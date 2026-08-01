@@ -1,0 +1,27 @@
+{
+  "name": "@narada-core/work-lifecycle-core",
+  "version": "0.1.0",
+  "description": "Neutral transactional authority for sibling Narada ticket and task aggregates.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./store": { "types": "./dist/store.d.ts", "import": "./dist/store.js" },
+    "./types": { "types": "./dist/types.d.ts", "import": "./dist/types.js" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm build && node --test test/work-lifecycle-store.test.mjs"
+  },
+  "dependencies": {
+    "@narada-core/task-governance-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": { "node": ">=22.0.0" }
+}

@@ -1,5 +1,5 @@
 {
-  "name": "@narada2/artifact-integrity",
+  "name": "@narada-core/artifact-integrity",
   "version": "0.1.0",
   "description": "Neutral sealed artifact, build receipt, and source freshness contracts for Narada runtimes.",
   "license": "Apache-2.0",

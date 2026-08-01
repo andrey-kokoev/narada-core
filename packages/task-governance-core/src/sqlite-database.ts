@@ -5,6 +5,7 @@ type BindArgs = unknown[];
 interface NodeSqliteStatement {
   all(...args: BindArgs): unknown[];
   get(...args: BindArgs): unknown;
+  iterate(...args: BindArgs): IterableIterator<unknown>;
   run(...args: BindArgs): RunResult;
 }
 
@@ -26,6 +27,7 @@ export interface RunResult {
 export interface Statement {
   all(...args: BindArgs): unknown[];
   get(...args: BindArgs): unknown;
+  iterate(...args: BindArgs): IterableIterator<unknown>;
   run(...args: BindArgs): RunResult;
   pluck(): Statement;
 }
@@ -123,6 +125,11 @@ class StatementAdapter implements Statement {
   get(...args: BindArgs): unknown {
     const row = this.statement.get(...args);
     return this.pluckFirstValue ? firstColumnValue(row) : row;
+  }
+  *iterate(...args: BindArgs): IterableIterator<unknown> {
+    for (const row of this.statement.iterate(...args)) {
+      yield this.pluckFirstValue ? firstColumnValue(row) : row;
+    }
   }
   run(...args: BindArgs): RunResult {
     return this.statement.run(...args);

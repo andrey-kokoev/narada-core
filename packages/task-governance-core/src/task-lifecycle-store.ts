@@ -12,7 +12,8 @@
  */
 
 import Database from "./sqlite-database.js";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
 import type { VerificationRunRow } from "./intent-zone-types.js";
 import type {
   CommandApprovalPosture,
@@ -63,6 +64,8 @@ export type TaskClosureMode =
 export interface TaskLifecycleRow {
   task_id: string;
   task_number: number;
+  /** Monotonic aggregate revision when hosted by Work Lifecycle. */
+  revision?: number;
   status: TaskStatus;
   governed_by: string | null;
   closed_at: string | null;
@@ -668,6 +671,7 @@ function rowToLifecycle(row: Record<string, unknown>): TaskLifecycleRow {
   return {
     task_id: String(row.task_id),
     task_number: Number(row.task_number),
+    revision: row.revision === null || row.revision === undefined ? undefined : Number(row.revision),
     status: String(row.status) as TaskStatus,
     governed_by: row.governed_by ? String(row.governed_by) : null,
     closed_at: row.closed_at ? String(row.closed_at) : null,
@@ -1216,8 +1220,42 @@ export interface SqliteTaskLifecycleStoreOptions {
 export const TASK_LIFECYCLE_BUSY_TIMEOUT_MS = 30000;
 export const TASK_LIFECYCLE_SYNCHRONOUS_MODE = 'normal';
 export const TASK_LIFECYCLE_FAST_SQLITE_ENV = 'NARADA_TASK_LIFECYCLE_FAST_SQLITE';
+/** Current prepared lifecycle-store contract. Bump only with an explicit migration. */
+export const TASK_LIFECYCLE_SCHEMA_VERSION = 1;
+
+export type TaskLifecycleStoreOpenMode = 'prepare' | 'runtime';
+
+export interface TaskLifecycleStoreOpenOptions {
+  /**
+   * `prepare` preserves the legacy self-initializing behavior for compatibility.
+   * `runtime` is the MCP startup-safe path and refuses missing/stale stores.
+   */
+  mode?: TaskLifecycleStoreOpenMode;
+  /**
+   * Optional Site-relative or absolute database path. Work Lifecycle uses this
+   * to host task and ticket aggregates in one canonical database.
+   */
+  databasePath?: string;
+}
+
+export type TaskLifecyclePreparationStatus = 'prepared' | 'missing' | 'stale' | 'invalid';
+
+export interface TaskLifecyclePreparationInspection {
+  status: TaskLifecyclePreparationStatus;
+  db_path: string;
+  schema_version: number | null;
+  reason?: string;
+}
 
 const initializedLifecycleDbPaths = new Set<string>();
+
+export function resolveTaskLifecycleDatabasePath(
+  cwd: string,
+  databasePath?: string,
+): string {
+  if (!databasePath) return join(resolve(cwd), '.ai', 'task-lifecycle.db');
+  return isAbsolute(databasePath) ? resolve(databasePath) : resolve(cwd, databasePath);
+}
 
 const REQUIRED_LIFECYCLE_TABLES = [
   'task_lifecycle',
@@ -1306,10 +1344,14 @@ function ensureColumn(db: Db, tableName: string, columnName: string, columnType:
   }
 }
 
-export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
+export function openTaskLifecycleStore(
+  cwd: string,
+  options: TaskLifecycleStoreOpenOptions = {},
+): SqliteTaskLifecycleStore {
+  if (options.mode === 'runtime') return openPreparedTaskLifecycleStore(cwd, options);
   const runtime = selectSqliteRuntime();
   assertSqliteRuntimeSupported(runtime);
-  const dbPath = join(cwd, ".ai", "task-lifecycle.db");
+  const dbPath = resolveTaskLifecycleDatabasePath(cwd, options.databasePath);
   const db = new Database(dbPath);
   db.pragma(`busy_timeout = ${TASK_LIFECYCLE_BUSY_TIMEOUT_MS}`);
   if (process.env[TASK_LIFECYCLE_FAST_SQLITE_ENV] === '1') {
@@ -1345,6 +1387,124 @@ export function openTaskLifecycleStore(cwd: string): SqliteTaskLifecycleStore {
     initializedLifecycleDbPaths.add(dbPath);
   }
   return store;
+}
+
+/**
+ * Open an already prepared lifecycle store without changing journal mode,
+ * creating schema objects, or running migrations. This is the only opener
+ * suitable for an MCP startup path.
+ */
+export function openPreparedTaskLifecycleStore(
+  cwd: string,
+  options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'> = {},
+): SqliteTaskLifecycleStore {
+  const runtime = selectSqliteRuntime();
+  assertSqliteRuntimeSupported(runtime);
+  const dbPath = resolveTaskLifecycleDatabasePath(cwd, options.databasePath);
+  if (!existsSync(dbPath)) {
+    throw new Error('task_lifecycle_store_not_prepared:database_missing');
+  }
+
+  let db: Database;
+  try {
+    db = new Database(dbPath);
+  } catch {
+    // An existing non-SQLite file (or a path that is not openable as a
+    // database) is a preparation failure, not a generic startup crash. Keep
+    // the same structured readiness prefix used for missing and stale stores
+    // so MCP callers can present the documented remediation.
+    throw new Error('task_lifecycle_store_not_prepared:invalid_database');
+  }
+  try {
+    db.pragma(`busy_timeout = ${TASK_LIFECYCLE_BUSY_TIMEOUT_MS}`);
+    if (process.env[TASK_LIFECYCLE_FAST_SQLITE_ENV] === '1') {
+      db.pragma('journal_mode = MEMORY');
+      db.pragma('synchronous = OFF');
+    } else {
+      const journalMode = String(db.pragma('journal_mode')).toLowerCase();
+      if (journalMode !== 'wal') {
+        throw new Error(`task_lifecycle_store_not_prepared:journal_mode_${journalMode || 'unknown'}`);
+      }
+      db.pragma(`synchronous = ${TASK_LIFECYCLE_SYNCHRONOUS_MODE}`);
+    }
+
+    if (!hasCurrentLifecycleSchema(db)) {
+      throw new Error('task_lifecycle_store_not_prepared:schema');
+    }
+    const schemaVersion = Number(db.pragma('user_version') ?? 0);
+    if (schemaVersion !== TASK_LIFECYCLE_SCHEMA_VERSION) {
+      throw new Error(`task_lifecycle_store_not_prepared:schema_version_${schemaVersion}`);
+    }
+    return new SqliteTaskLifecycleStore({ db });
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      // Preserve the readiness error.
+    }
+    if (error instanceof Error && /not a database|SQLITE_NOTADB/i.test(error.message)) {
+      throw new Error('task_lifecycle_store_not_prepared:invalid_database');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Explicitly prepare the lifecycle store. Callers own the returned handle and
+ * must close it after any surface-specific preparation work is complete.
+ */
+export function prepareTaskLifecycleStore(
+  cwd: string,
+  options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'> = {},
+): SqliteTaskLifecycleStore {
+  const siteRoot = join(cwd);
+  const dbPath = resolveTaskLifecycleDatabasePath(siteRoot, options.databasePath);
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const store = openTaskLifecycleStore(siteRoot, { mode: 'prepare', databasePath: dbPath });
+  try {
+    store.db.pragma(`user_version = ${TASK_LIFECYCLE_SCHEMA_VERSION}`);
+    return store;
+  } catch (error) {
+    try {
+      store.db.close();
+    } catch {
+      // Preserve the preparation failure.
+    }
+    throw error;
+  }
+}
+
+export function inspectPreparedTaskLifecycleStore(
+  cwd: string,
+  options: Pick<TaskLifecycleStoreOpenOptions, 'databasePath'> = {},
+): TaskLifecyclePreparationInspection {
+  const dbPath = resolveTaskLifecycleDatabasePath(cwd, options.databasePath);
+  if (!existsSync(dbPath)) {
+    return { status: 'missing', db_path: dbPath, schema_version: null, reason: 'database_missing' };
+  }
+  try {
+    const store = openPreparedTaskLifecycleStore(cwd, { databasePath: dbPath });
+    try {
+      return {
+        status: 'prepared',
+        db_path: dbPath,
+        schema_version: Number(store.db.pragma('user_version') ?? 0),
+      };
+    } finally {
+      store.db.close();
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const schemaVersionMatch = reason.match(/schema_version_(\d+)/);
+    return {
+      status: reason.includes('not_prepared:schema') || reason.includes('journal_mode') || reason.includes('schema_version')
+        ? 'stale'
+        : 'invalid',
+      db_path: dbPath,
+      schema_version: schemaVersionMatch ? Number(schemaVersionMatch[1]) : null,
+      reason,
+    };
+  }
 }
 
 export class SqliteTaskLifecycleStore implements TaskLifecycleStore {

@@ -1,5 +1,5 @@
 {
-  "name": "@narada2/task-governance-core",
+  "name": "@narada-core/task-governance-core",
   "version": "0.1.0",
   "description": "Neutral task governance domain core shared by Narada runtimes and MCP surfaces.",
   "license": "Apache-2.0",
@@ -40,11 +40,11 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run test/lib --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000 && node test/import-boundary.test.mjs",
-    "test:smoke": "vitest run test/lib/task-lifecycle-store.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
-    "test:fast": "vitest run test/lib/task-lifecycle-store.test.ts test/lib/task-projection.test.ts test/lib/evidence-admission.test.ts test/lib/task-recommender.test.ts test/lib/task-close-service.test.ts test/lib/task-allocate-service.test.ts test/lib/task-search-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
-    "test:assignment-lifecycle": "vitest run test/lib/task-assignment-lifecycle-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000",
-    "test:governance": "vitest run test/lib/task-governance.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000"
+    "test": "vitest run test/lib --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000 && node test/import-boundary.test.mjs",
+    "test:smoke": "vitest run test/lib/task-lifecycle-store.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:fast": "vitest run test/lib/task-lifecycle-store.test.ts test/lib/task-projection.test.ts test/lib/evidence-admission.test.ts test/lib/task-recommender.test.ts test/lib/task-close-service.test.ts test/lib/task-allocate-service.test.ts test/lib/task-search-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:assignment-lifecycle": "vitest run test/lib/task-assignment-lifecycle-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000",
+    "test:governance": "vitest run test/lib/task-governance.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

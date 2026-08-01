@@ -1,4 +1,4 @@
-# @narada2/task-governance-core
+# @narada-core/task-governance-core
 
 Task governance is Narada's self-build control subsystem. It owns the durable task lifecycle, task assignment, evidence admission, task projection, recommendation, reconciliation-facing domain rules, and package-level tests for those rules.
 
@@ -57,35 +57,35 @@ Command Execution Intent Zone and Testing Intent Zone row shapes are mirrored lo
 The CLI consumes this package through workspace package exports. After editing `packages/task-governance/src`, run:
 
 ```bash
-pnpm --filter @narada2/task-governance-core build
-pnpm --filter @narada2/cli typecheck
+pnpm --filter @narada-core/task-governance-core build
+pnpm --filter @narada-core/cli typecheck
 ```
 
 After editing lower shared contracts in `packages/intent-zones/src`, build from the lower package upward:
 
 ```bash
-pnpm --filter @narada2/intent-zones build
-pnpm --filter @narada2/task-governance-core build
-pnpm --filter @narada2/cli typecheck
+pnpm --filter @narada-core/intent-zones build
+pnpm --filter @narada-core/task-governance-core build
+pnpm --filter @narada-core/cli typecheck
 ```
 
-`pnpm verify` includes only the `@narada2/task-governance-core` smoke test. Broader package tests are intentionally separate because they exercise file-backed SQLite and dominate the fast gate runtime:
+`pnpm verify` includes only the `@narada-core/task-governance-core` smoke test. Broader package tests are intentionally separate because they exercise file-backed SQLite and dominate the fast gate runtime:
 
 ```bash
-pnpm --filter @narada2/task-governance-core test:smoke
-pnpm --filter @narada2/task-governance-core test:fast
+pnpm --filter @narada-core/task-governance-core test:smoke
+pnpm --filter @narada-core/task-governance-core test:fast
 ```
 
 Assignment-lifecycle integration coverage is also separate:
 
 ```bash
-pnpm --filter @narada2/task-governance-core test:assignment-lifecycle
+pnpm --filter @narada-core/task-governance-core test:assignment-lifecycle
 ```
 
 The exhaustive governance test is also intentionally separate:
 
 ```bash
-pnpm --filter @narada2/task-governance-core test:governance
+pnpm --filter @narada-core/task-governance-core test:governance
 ```
 
 Use `test:fast` when changing projection, recommender, evidence admission, close, allocation, or search semantics. Use the assignment-lifecycle test when changing claim, continue, release, roster, or assignment-intent semantics. Use the exhaustive governance test when changing lint, lifecycle, report, review, or dependency semantics.

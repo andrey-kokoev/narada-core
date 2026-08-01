@@ -1,12 +1,16 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import Database from '../../src/sqlite-database.js';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   openTaskLifecycleStore,
+  openPreparedTaskLifecycleStore,
+  prepareTaskLifecycleStore,
+  inspectPreparedTaskLifecycleStore,
   SqliteTaskLifecycleStore,
   TASK_LIFECYCLE_BUSY_TIMEOUT_MS,
+  TASK_LIFECYCLE_SCHEMA_VERSION,
   TASK_LIFECYCLE_SYNCHRONOUS_MODE,
   type TaskLifecycleRow,
   type TaskAssignmentRow,
@@ -106,6 +110,59 @@ describe('SqliteTaskLifecycleStore', () => {
       } finally {
         opened.db.close();
       }
+    });
+
+    it('requires explicit preparation before the startup-safe runtime opener accepts a store', async () => {
+      tempDir = await mkdtemp(join(tmpdir(), 'narada-lifecycle-store-prepared-'));
+      await mkdir(join(tempDir, '.ai'), { recursive: true });
+
+      expect(inspectPreparedTaskLifecycleStore(tempDir)).toMatchObject({
+        status: 'missing',
+        schema_version: null,
+      });
+      expect(() => openPreparedTaskLifecycleStore(tempDir!)).toThrow('database_missing');
+
+      const prepared = prepareTaskLifecycleStore(tempDir);
+      prepared.db.close();
+      expect(inspectPreparedTaskLifecycleStore(tempDir)).toMatchObject({
+        status: 'prepared',
+        schema_version: TASK_LIFECYCLE_SCHEMA_VERSION,
+      });
+
+      const opened = openPreparedTaskLifecycleStore(tempDir);
+      try {
+        expect(opened.db.prepare("select name from sqlite_master where type = 'table' and name = 'task_lifecycle'").get()).toBeTruthy();
+      } finally {
+        opened.db.close();
+      }
+    });
+
+    it('reports a prepared database with an obsolete schema version as stale', async () => {
+      tempDir = await mkdtemp(join(tmpdir(), 'narada-lifecycle-store-stale-'));
+      await mkdir(join(tempDir, '.ai'), { recursive: true });
+
+      const prepared = prepareTaskLifecycleStore(tempDir);
+      prepared.db.pragma('user_version = 0');
+      prepared.db.close();
+
+      expect(inspectPreparedTaskLifecycleStore(tempDir)).toMatchObject({
+        status: 'stale',
+        schema_version: 0,
+      });
+      expect(() => openPreparedTaskLifecycleStore(tempDir!)).toThrow('schema_version_0');
+    });
+
+    it('reports an existing non-SQLite file as an invalid prepared store', async () => {
+      tempDir = await mkdtemp(join(tmpdir(), 'narada-lifecycle-store-invalid-'));
+      await mkdir(join(tempDir, '.ai'), { recursive: true });
+      await writeFile(join(tempDir, '.ai', 'task-lifecycle.db'), 'not a sqlite database', 'utf8');
+
+      expect(inspectPreparedTaskLifecycleStore(tempDir)).toMatchObject({
+        status: 'invalid',
+        schema_version: null,
+        reason: 'task_lifecycle_store_not_prepared:invalid_database',
+      });
+      expect(() => openPreparedTaskLifecycleStore(tempDir!)).toThrow('invalid_database');
     });
 
     it('upgrades an existing file-backed store when newer tables are missing', async () => {

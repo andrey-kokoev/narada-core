@@ -5,11 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const packageRoot = dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const forbidden = [
-  '@narada2/task-governance',
-  '@narada2/task-lifecycle-mcp',
-  '@narada2/mcp-transport',
-  '@narada2/control-plane',
-  '@narada2/intent-zones',
+  '@narada-core/task-governance',
+  '@narada-core/task-lifecycle-mcp',
+  '@narada-core/mcp-transport',
+  '@narada-core/control-plane',
+  '@narada-core/intent-zones',
 ];
 
 const files = [

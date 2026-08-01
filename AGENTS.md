@@ -8,7 +8,7 @@ Guidance for agents working in this repository.
 
 Current packages:
 
-- `@narada2/task-governance-core`: neutral task governance domain core.
+- `@narada-core/task-governance-core`: neutral task governance domain core.
 
 ## Common Commands
 
@@ -23,9 +23,9 @@ pnpm test         # pnpm -r test (runs all packages' test scripts)
 Run from the repo root:
 
 ```powershell
-pnpm --filter @narada2/task-governance-core build
-pnpm --filter @narada2/task-governance-core typecheck   # tsc --noEmit (NOT tsc -b)
-pnpm --filter @narada2/task-governance-core test
+pnpm --filter @narada-core/task-governance-core build
+pnpm --filter @narada-core/task-governance-core typecheck   # tsc --noEmit (NOT tsc -b)
+pnpm --filter @narada-core/task-governance-core test
 ```
 
 ### Targeted Tests
@@ -33,10 +33,10 @@ pnpm --filter @narada2/task-governance-core test
 All vitest tests use `--pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1 --testTimeout=120000 --hookTimeout=120000` because tests exercise file-backed SQLite and cannot share a database connection.
 
 ```powershell
-pnpm --filter @narada2/task-governance-core test:smoke   # single fastest test
-pnpm --filter @narada2/task-governance-core test:fast     # core domain tests (projection, recommender, evidence, close, allocate, search)
-pnpm --filter @narada2/task-governance-core test:assignment-lifecycle  # claim/continue/release/roster
-pnpm --filter @narada2/task-governance-core test:governance            # exhaustive lint/lifecycle/report/review
+pnpm --filter @narada-core/task-governance-core test:smoke   # single fastest test
+pnpm --filter @narada-core/task-governance-core test:fast     # core domain tests (projection, recommender, evidence, close, allocate, search)
+pnpm --filter @narada-core/task-governance-core test:assignment-lifecycle  # claim/continue/release/roster
+pnpm --filter @narada-core/task-governance-core test:governance            # exhaustive lint/lifecycle/report/review
 ```
 
 Guidance:
@@ -49,7 +49,7 @@ Guidance:
 
 ## Import Boundary
 
-Each package enforces that source files do not import from forbidden packages (e.g. `@narada2/task-governance`, `@narada2/task-lifecycle-mcp`, `@narada2/mcp-transport`).
+Each package enforces that source files do not import from forbidden packages (e.g. `@narada-core/task-governance`, `@narada-core/task-lifecycle-mcp`, `@narada-core/mcp-transport`).
 
 - `.import-boundary-files.json` in the package root lists every source file that must be checked.
 - `test/import-boundary.test.mjs` (plain Node script, not vitest) runs the checks.
@@ -61,12 +61,12 @@ Each package enforces that source files do not import from forbidden packages (e
 - Preserve ESM/NodeNext module resolution.
 - `strict: true` is set per-package (not in `tsconfig.base.json`).
 - This repo is domain-focused: no MCP stdio server ownership, no carrier launch logic, no site-local adapter code.
-- Do not import from Narada proper packages (e.g. `@narada2/task-governance`).
-- Do not import from MCP surface packages (e.g. `@narada2/task-lifecycle-mcp`, `@narada2/mcp-transport`).
+- Do not import from Narada proper packages (e.g. `@narada-core/task-governance`).
+- Do not import from MCP surface packages (e.g. `@narada-core/task-lifecycle-mcp`, `@narada-core/mcp-transport`).
 
 ## Environment Requirements
 
-- Node >= 22.0.0 (required by `@narada2/task-governance-core`)
+- Node >= 22.0.0 (required by `@narada-core/task-governance-core`)
 - pnpm@10.9.0 (declared in root `package.json`)
 
 ## Architecture

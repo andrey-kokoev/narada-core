@@ -109,13 +109,13 @@ async function sealFixture(
   selectedCompatibility = compatibility,
 ) {
   const sourceClosure = await captureSourceClosure({
-    package_name: "@narada2/example",
-    roots: [{ root: input.source, logical_prefix: "packages/@narada2/example" }],
+    package_name: "@narada-core/example",
+    roots: [{ root: input.source, logical_prefix: "packages/@narada-core/example" }],
   });
   return sealDeployment({
     store_root: input.store,
     deployment_root: input.deployment,
-    package_name: "@narada2/example",
+    package_name: "@narada-core/example",
     artifact_profile: "mcp-surface",
     source_closure: sourceClosure,
     build_recipe: recipe,
@@ -129,7 +129,7 @@ async function sealFixture(
 describe("canonical artifact integrity", () => {
   it("pins the package-manager deployment operation into the build recipe", () => {
     const generated = createBuildRecipe({
-      package_name: "@narada2/example",
+      package_name: "@narada-core/example",
       package_root: "D:\\workspace\\packages\\example",
       workspace_root: "D:\\workspace",
       declaration: {
@@ -142,7 +142,7 @@ describe("canonical artifact integrity", () => {
       command: "pnpm",
       args: [
         "--filter",
-        "@narada2/example",
+        "@narada-core/example",
         "deploy",
         "--prod",
         "{deployment_root}",
@@ -151,7 +151,7 @@ describe("canonical artifact integrity", () => {
       working_directory: ".",
       materialization: "dereference_internal_links_v1",
     });
-    expect(generated.args).toEqual(["--filter", "@narada2/example", "run", "build"]);
+    expect(generated.args).toEqual(["--filter", "@narada-core/example", "run", "build"]);
     expect(JSON.stringify(generated)).not.toContain("D:\\workspace");
   });
 
@@ -348,8 +348,8 @@ describe("canonical artifact integrity", () => {
 
     await expect(
       captureSourceClosure({
-        package_name: "@narada2/example",
-        roots: [{ root: source, logical_prefix: "packages/@narada2/example" }],
+        package_name: "@narada-core/example",
+        roots: [{ root: source, logical_prefix: "packages/@narada-core/example" }],
       }),
     ).rejects.toMatchObject({ code: "artifact_source_link_external" });
   });
@@ -373,13 +373,13 @@ describe("canonical artifact integrity", () => {
   it("runs the final source guard before publishing a new channel", async () => {
     const input = await fixture();
     const sourceClosure = await captureSourceClosure({
-      package_name: "@narada2/example",
-      roots: [{ root: input.source, logical_prefix: "packages/@narada2/example" }],
+      package_name: "@narada-core/example",
+      roots: [{ root: input.source, logical_prefix: "packages/@narada-core/example" }],
     });
     await expect(sealDeployment({
       store_root: input.store,
       deployment_root: input.deployment,
-      package_name: "@narada2/example",
+      package_name: "@narada-core/example",
       artifact_profile: "mcp-surface",
       source_closure: sourceClosure,
       build_recipe: recipe,
@@ -395,8 +395,8 @@ describe("canonical artifact integrity", () => {
     })).rejects.toMatchObject({ code: "artifact_build_inputs_changed" });
     const paths = artifactStorePaths(
       input.store,
-      "@narada2/example",
-      compatibilityKey("@narada2/example", compatibility),
+      "@narada-core/example",
+      compatibilityKey("@narada-core/example", compatibility),
     );
     await expect(access(paths.channel)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -421,12 +421,12 @@ describe("canonical artifact integrity", () => {
         selector: {
           mode: "latest_compatible",
           store_root: input.store,
-          package_name: "@narada2/example",
+          package_name: "@narada-core/example",
           compatibility,
           source_policy: "require_fresh",
         },
         source_roots: [
-          { root: input.source, logical_prefix: "packages/@narada2/example" },
+          { root: input.source, logical_prefix: "packages/@narada-core/example" },
         ],
       }),
     ).rejects.toMatchObject({ code: "artifact_source_stale" });
@@ -439,7 +439,7 @@ describe("canonical artifact integrity", () => {
     await expect(
       verifyClosure({
         store_root: input.store,
-        package_name: "@narada2/example",
+        package_name: "@narada-core/example",
         closure_digest: sealed.closure.closure_digest,
       }),
     ).rejects.toMatchObject({ code: "artifact_closure_corrupt" });
@@ -500,8 +500,8 @@ describe("canonical artifact integrity", () => {
     };
     const paths = artifactStorePaths(
       input.store,
-      "@narada2/example",
-      compatibilityKey("@narada2/example", compatibility),
+      "@narada-core/example",
+      compatibilityKey("@narada-core/example", compatibility),
     );
     await cp(
       sealed.closure_path,
@@ -514,7 +514,7 @@ describe("canonical artifact integrity", () => {
     );
     await expect(verifyClosure({
       store_root: input.store,
-      package_name: "@narada2/example",
+      package_name: "@narada-core/example",
       closure_digest: forged.closure_digest,
     })).rejects.toMatchObject({ code: "artifact_closure_corrupt" });
   });
@@ -524,8 +524,8 @@ describe("canonical artifact integrity", () => {
     const sealed = await sealFixture(input, "2026-07-25T00:00:00.000Z");
     const paths = artifactStorePaths(
       input.store,
-      "@narada2/example",
-      compatibilityKey("@narada2/example", compatibility),
+      "@narada-core/example",
+      compatibilityKey("@narada-core/example", compatibility),
     );
     const incompatible = {
       ...sealed.channel,
@@ -554,12 +554,12 @@ describe("canonical artifact integrity", () => {
       selector: {
         mode: "latest_compatible",
         store_root: input.store,
-        package_name: "@narada2/example",
+        package_name: "@narada-core/example",
         compatibility,
         source_policy: "require_fresh",
       },
       source_roots: [
-        { root: input.source, logical_prefix: "packages/@narada2/example" },
+        { root: input.source, logical_prefix: "packages/@narada-core/example" },
       ],
     })).rejects.toMatchObject({ code: "artifact_channel_corrupt" });
 
@@ -568,19 +568,19 @@ describe("canonical artifact integrity", () => {
       paths.receiptRecord(sealed.receipt.receipt_digest),
       `${canonicalJson({
         ...sealed.receipt,
-        package_name: "@narada2/another-package",
+        package_name: "@narada-core/another-package",
       })}\n`,
     );
     await expect(resolveArtifactSelector({
       selector: {
         mode: "latest_compatible",
         store_root: input.store,
-        package_name: "@narada2/example",
+        package_name: "@narada-core/example",
         compatibility,
         source_policy: "require_fresh",
       },
       source_roots: [
-        { root: input.source, logical_prefix: "packages/@narada2/example" },
+        { root: input.source, logical_prefix: "packages/@narada-core/example" },
       ],
     })).rejects.toMatchObject({ code: "artifact_channel_corrupt" });
   });
@@ -607,7 +607,7 @@ describe("canonical artifact integrity", () => {
       active_selectors: [{
         mode: "latest_compatible",
         store_root: input.store,
-        package_name: "@narada2/example",
+        package_name: "@narada-core/example",
         compatibility: nextCompatibility,
         source_policy: "require_fresh",
       }],
@@ -619,8 +619,8 @@ describe("canonical artifact integrity", () => {
     await expect(access(activeArtifact.channel_path)).resolves.toBeUndefined();
     const oldPaths = artifactStorePaths(
       input.store,
-      "@narada2/example",
-      compatibilityKey("@narada2/example", compatibility),
+      "@narada-core/example",
+      compatibilityKey("@narada-core/example", compatibility),
     );
     await expect(
       access(oldPaths.receiptRecord(oldArtifact.receipt.receipt_digest)),
@@ -633,8 +633,8 @@ describe("canonical artifact integrity", () => {
     const active = await sealFixture(input, "2026-07-25T00:00:00.000Z");
     const paths = artifactStorePaths(
       input.store,
-      "@narada2/example",
-      compatibilityKey("@narada2/example", compatibility),
+      "@narada-core/example",
+      compatibilityKey("@narada-core/example", compatibility),
     );
     await writeFile(
       paths.receiptRecord(active.receipt.receipt_digest),
@@ -646,7 +646,7 @@ describe("canonical artifact integrity", () => {
       active_selectors: [{
         mode: "latest_compatible",
         store_root: input.store,
-        package_name: "@narada2/example",
+        package_name: "@narada-core/example",
         compatibility,
         source_policy: "require_fresh",
       }],

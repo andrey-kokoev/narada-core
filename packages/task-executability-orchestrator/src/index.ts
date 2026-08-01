@@ -3,7 +3,7 @@ import {
   validateTaskExecutabilityAssessment,
   type TaskExecutabilityAssessment,
   type TaskExecutabilityDeclaredEnvironment,
-} from '@narada2/task-governance-core/task-executability-contract';
+} from '@narada-core/task-governance-core/task-executability-contract';
 
 export const TASK_EXECUTABILITY_ORCHESTRATOR_SCHEMA = 'narada.task.executability.orchestrator.v1' as const;
 export const TASK_EXECUTABILITY_OUTPUT_SCHEMA = TASK_EXECUTABILITY_ASSESSMENT_SCHEMA;

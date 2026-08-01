@@ -4,7 +4,7 @@ import {
   TASK_EXECUTABILITY_ASSESSMENT_SCHEMA,
   TASK_EXECUTABILITY_DECLARED_ENVIRONMENT_SCHEMA,
   TASK_EXECUTABILITY_EVALUATOR_PROVENANCE_SCHEMA,
-} from '@narada2/task-governance-core/task-executability-contract';
+} from '@narada-core/task-governance-core/task-executability-contract';
 import {
   TaskExecutabilityOrchestrator,
   deterministicIdempotencyKey,
