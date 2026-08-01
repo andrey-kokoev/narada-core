@@ -29,7 +29,7 @@ importers:
 
   packages/task-executability-orchestrator:
     dependencies:
-      '@narada2/task-governance-core':
+      '@narada-core/task-governance-core':
         specifier: workspace:*
         version: link:../task-governance-core
     devDependencies:
@@ -54,7 +54,7 @@ importers:
 
   packages/work-lifecycle-core:
     dependencies:
-      '@narada2/task-governance-core':
+      '@narada-core/task-governance-core':
         specifier: workspace:*
         version: link:../task-governance-core
     devDependencies:
