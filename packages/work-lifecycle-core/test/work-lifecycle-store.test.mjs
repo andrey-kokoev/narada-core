@@ -109,6 +109,30 @@ test('source admission is canonical, idempotent, and fenced to one writer', () =
   }
 });
 
+test('writer authority heartbeat keeps a short lease alive during long-running work', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'narada-work-heartbeat-'));
+  const inspection = prepareWorkLifecycleStore(root);
+  assert.equal(inspection.status, 'prepared');
+  const store = openPreparedWorkLifecycleStore(root, {
+    writerId: 'heartbeat-writer',
+    writerLeaseMs: 60,
+  });
+  try {
+    const before = store.db.prepare(
+      'select heartbeat_at from work_runtime_authority where singleton = 1',
+    ).get().heartbeat_at;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const after = store.db.prepare(
+      'select heartbeat_at, lease_expires_at from work_runtime_authority where singleton = 1',
+    ).get();
+    assert.notEqual(after.heartbeat_at, before);
+    assert.ok(new Date(after.lease_expires_at).getTime() > Date.now());
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('hard cutover migrates task evidence and active tickets while omitting Site Loop tables', () => {
   const root = mkdtempSync(join(tmpdir(), 'narada-work-cutover-'));
   const sourcePath = join(root, '.ai', 'task-lifecycle.db');
@@ -334,6 +358,12 @@ test('follow-up task creation and terminal reactivation are one-database events'
     const taskBefore = f.store.taskStore.getLifecycle(proposal.task_id);
     assert.equal(taskBefore.status, 'opened');
     assert.ok(Number.isInteger(taskBefore.revision));
+    const outcomeContract = f.store.taskStore.getLatestTaskOutcomeContract(proposal.task_id);
+    assert.ok(outcomeContract);
+    assert.equal(outcomeContract.outcome_type, 'ticket_followup_completion');
+    assert.deepEqual(JSON.parse(outcomeContract.allowed_outcomes_json), ['completed']);
+    assert.deepEqual(JSON.parse(outcomeContract.satisfying_outcomes_json), ['completed']);
+    assert.deepEqual(JSON.parse(outcomeContract.required_fields_json), ['summary']);
 
     f.store.taskStore.updateStatus(proposal.task_id, 'closed', 'test', {
       closed_at: new Date().toISOString(),

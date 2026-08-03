@@ -45,7 +45,19 @@ async function temporaryRoot(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    temporaryRoots.splice(0).map(async (root) => {
+      // Windows transiently locks freshly written files (Defender, indexer);
+      // retry, then tolerate leftover temp dirs rather than flake the suite.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          await rm(root, { recursive: true, force: true });
+          return;
+        } catch (error) {
+          if (attempt === 5) return;
+          await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        }
+      }
+    }),
   );
 });
 

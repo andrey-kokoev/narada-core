@@ -724,6 +724,7 @@ export function openPreparedWorkLifecycleStore(
   });
   try {
     store.acquireWriterAuthority();
+    store.startWriterAuthorityHeartbeat();
     return store;
   } catch (error) {
     taskStore.db.close();
@@ -1029,6 +1030,7 @@ export class WorkLifecycleStore {
   readonly writerLeaseMs: number;
   readonly #now: () => Date;
   #closed = false;
+  #writerHeartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(taskStore: SqliteTaskLifecycleStore, options: Required<Pick<
     WorkLifecycleOpenOptions,
@@ -1086,6 +1088,31 @@ export class WorkLifecycleStore {
     if (result.changes !== 1) throw new Error('work_lifecycle_writer_authority_lost');
   }
 
+  startWriterAuthorityHeartbeat(intervalMs?: number): void {
+    if (this.#closed || this.#writerHeartbeatTimer) return;
+    const defaultIntervalMs = Number.isFinite(this.writerLeaseMs) && this.writerLeaseMs > 0
+      ? Math.max(10, Math.floor(this.writerLeaseMs / 3))
+      : 1_000;
+    const normalizedIntervalMs = Number.isFinite(intervalMs) && (intervalMs ?? 0) > 0
+      ? Math.max(1, Math.floor(intervalMs as number))
+      : defaultIntervalMs;
+    this.#writerHeartbeatTimer = setInterval(() => {
+      if (this.#closed) return;
+      try {
+        this.heartbeatWriterAuthority();
+      } catch {
+        // State-changing operations remain fail-closed through #assertWriterAuthority.
+      }
+    }, normalizedIntervalMs);
+    this.#writerHeartbeatTimer.unref?.();
+  }
+
+  stopWriterAuthorityHeartbeat(): void {
+    if (!this.#writerHeartbeatTimer) return;
+    clearInterval(this.#writerHeartbeatTimer);
+    this.#writerHeartbeatTimer = null;
+  }
+
   releaseWriterAuthority(): void {
     if (this.#closed) return;
     this.db.prepare(
@@ -1096,6 +1123,7 @@ export class WorkLifecycleStore {
   close(options: { checkpointWal?: boolean } = {}): void {
     if (this.#closed) return;
     try {
+      this.stopWriterAuthorityHeartbeat();
       this.releaseWriterAuthority();
       if (options.checkpointWal === true) {
         this.db.exec('pragma wal_checkpoint(TRUNCATE);');
@@ -1513,6 +1541,18 @@ export class WorkLifecycleStore {
             dependencies_json: '[]',
             tags_json: canonicalJson(normalized.task.tags ?? []),
             updated_at: now,
+          });
+          this.taskStore.upsertTaskOutcomeContract({
+            contract_id: stableId('contract_ticket_followup', normalized.idempotency_key, 24),
+            task_id: taskId,
+            outcome_type: 'ticket_followup_completion',
+            allowed_outcomes_json: canonicalJson(['completed']),
+            satisfying_outcomes_json: canonicalJson(['completed']),
+            blocking_outcomes_json: canonicalJson([]),
+            required_fields_json: canonicalJson(['summary']),
+            capability_requirement: null,
+            created_by: normalized.actor_id,
+            created_at: now,
           });
           this.db.prepare(`
             insert into ticket_task_links(
