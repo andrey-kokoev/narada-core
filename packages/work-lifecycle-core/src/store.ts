@@ -224,10 +224,20 @@ function normalizeDraftDispositionEvidence(
   if (input.schema !== 'narada.graph_mail.ticket_draft_disposition_receipt.v1') {
     throw new Error('ticket_draft_disposition_evidence_schema_invalid');
   }
-  if (input.evidence_kind !== 'synchronized_graph_observation') {
-    throw new Error('ticket_draft_disposition_evidence_kind_invalid');
-  }
-  if (input.disposition !== 'sent' || input.is_draft !== false) {
+  const sentEvidence = input.evidence_kind === 'synchronized_graph_observation'
+    && input.disposition === 'sent'
+    && input.is_draft === false;
+  const confirmedDiscardEvidence = input.evidence_kind === 'operator_confirmed_graph_discard'
+    && input.disposition === 'discarded'
+    && input.is_draft === true
+    && input.graph_delete_confirmed === true
+    && input.graph_absence_confirmed === false;
+  const recoveredDiscardEvidence = input.evidence_kind === 'operator_authorized_graph_absence_after_verified_discard'
+    && input.disposition === 'discarded'
+    && input.is_draft === true
+    && input.graph_delete_confirmed === false
+    && input.graph_absence_confirmed === true;
+  if (!sentEvidence && !confirmedDiscardEvidence && !recoveredDiscardEvidence) {
     throw new Error('ticket_draft_disposition_evidence_state_invalid');
   }
   const normalized = {

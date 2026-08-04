@@ -100,6 +100,97 @@ test('source admission is canonical and idempotent across independent runtime co
   }
 });
 
+test('operator-authorized Graph discard is accepted as a terminal draft disposition', () => {
+  const f = fixture();
+  try {
+    const admitted = f.store.admitSource(source({
+      immutable_source_id: 'message-discarded-draft',
+      idempotency_key: 'admit:message-discarded-draft',
+    }));
+    const claim = f.store.admitProposal({
+      ticket_id: admitted.ticket_id,
+      expected_revision: admitted.ticket_revision,
+      route: 'response_draft',
+      idempotency_key: 'proposal:draft:discard',
+      causation_id: admitted.event_id,
+      actor_id: 'agent-test',
+      summary: 'Prepare then discard a controlled reply.',
+      draft: {
+        source_id: admitted.source_id,
+        reply_mode: 'reply',
+        body_text: 'Controlled reply that will not be sent.',
+      },
+    });
+    const draftId = 'draft-discard-1';
+    f.store.recordDraftReceipt({
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: claim.effect_claim_id,
+      draft_operation_key: claim.draft_operation_key,
+      draft_request_digest: claim.draft_request_digest,
+      receipt_id: 'graph-create-receipt-discard-1',
+      draft_id: draftId,
+      draft_ref: {
+        draft_id: draftId,
+        effect_claim_id: claim.effect_claim_id,
+        draft_operation_key: claim.draft_operation_key,
+        mailbox_id: claim.mailbox_id,
+      },
+      idempotency_key: 'record-draft-receipt:discard',
+      causation_id: 'graph-create-receipt-discard-1',
+    });
+    const observationId = 'graph_draft_discard_controlled';
+    const unsignedEvidence = {
+      schema: 'narada.graph_mail.ticket_draft_disposition_receipt.v1',
+      observation_id: observationId,
+      evidence_kind: 'operator_confirmed_graph_discard',
+      evidence_id: observationId,
+      disposition: 'discarded',
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: claim.effect_claim_id,
+      draft_operation_key: claim.draft_operation_key,
+      mailbox_id: claim.mailbox_id,
+      draft_id: draftId,
+      observed_message_id: draftId,
+      is_draft: true,
+      graph_delete_confirmed: true,
+      graph_absence_confirmed: false,
+      observed_at: '2026-08-03T22:30:00.000Z',
+    };
+    const evidence = { ...unsignedEvidence, receipt_sha256: receiptDigest(unsignedEvidence) };
+    const reconciled = f.store.reconcileDraftDisposition({
+      ticket_id: admitted.ticket_id,
+      draft_id: draftId,
+      evidence,
+      idempotency_key: `draft-disposition:${observationId}`,
+      causation_id: observationId,
+    });
+    assert.equal(reconciled.status, 'reconciled');
+    assert.equal(reconciled.ticket.status, 'actionable');
+    const shown = f.store.loadTicketProcessingContext({
+      ticket_id: admitted.ticket_id,
+      triggering_event_id: reconciled.event_id,
+      idempotency_key: 'context:draft-discard',
+    });
+    assert.equal(shown.draft_refs[0].disposition, 'discarded');
+    assert.deepEqual(shown.draft_refs[0].disposition_evidence, evidence);
+
+    const resolved = f.store.admitProposal({
+      ticket_id: admitted.ticket_id,
+      expected_revision: reconciled.ticket.revision,
+      route: 'resolved',
+      idempotency_key: 'proposal:resolved:discarded-draft',
+      causation_id: reconciled.event_id,
+      actor_id: 'agent-test',
+      summary: 'Controlled canary completed without sending.',
+      resolution_code: 'canary_completed_unsent',
+    });
+    assert.equal(resolved.status, 'admitted');
+    assert.equal(f.store.getTicket(admitted.ticket_id).status, 'resolved');
+  } finally {
+    f.close();
+  }
+});
+
 test('hard cutover migrates task evidence and active tickets while omitting Site Loop tables', () => {
   const root = mkdtempSync(join(tmpdir(), 'narada-work-cutover-'));
   const sourcePath = join(root, '.ai', 'task-lifecycle.db');

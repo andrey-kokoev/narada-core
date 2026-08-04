@@ -163,20 +163,37 @@ export interface ReconcileDraftDispositionInput {
   evidence: {
     schema: 'narada.graph_mail.ticket_draft_disposition_receipt.v1';
     observation_id: string;
-    evidence_kind: 'synchronized_graph_observation';
     evidence_id: string;
-    disposition: 'sent';
     ticket_id: string;
     effect_claim_id: string;
     draft_operation_key: string;
     mailbox_id: string;
     draft_id: string;
     observed_message_id: string;
-    is_draft: false;
     observed_at: string;
     receipt_sha256: string;
     [key: string]: unknown;
-  };
+  } & (
+    {
+      evidence_kind: 'synchronized_graph_observation';
+      disposition: 'sent';
+      is_draft: false;
+    }
+    | {
+      evidence_kind: 'operator_confirmed_graph_discard';
+      disposition: 'discarded';
+      is_draft: true;
+      graph_delete_confirmed: true;
+      graph_absence_confirmed: false;
+    }
+    | {
+      evidence_kind: 'operator_authorized_graph_absence_after_verified_discard';
+      disposition: 'discarded';
+      is_draft: true;
+      graph_delete_confirmed: false;
+      graph_absence_confirmed: true;
+    }
+  );
   idempotency_key: string;
   causation_id: string;
 }
