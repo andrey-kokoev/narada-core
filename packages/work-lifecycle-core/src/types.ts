@@ -207,8 +207,6 @@ export interface WorkLifecyclePreparationInspection {
 
 export interface WorkLifecycleOpenOptions {
   databasePath?: string;
-  writerId?: string;
-  writerLeaseMs?: number;
   now?: () => Date;
 }
 

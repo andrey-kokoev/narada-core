@@ -18,10 +18,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'narada-work-lifecycle-'));
   const inspection = prepareWorkLifecycleStore(root);
   assert.equal(inspection.status, 'prepared');
-  const store = openPreparedWorkLifecycleStore(root, {
-    writerId: 'test-writer',
-    writerLeaseMs: 60_000,
-  });
+  const store = openPreparedWorkLifecycleStore(root);
   return {
     root,
     store,
@@ -86,50 +83,20 @@ function clearOutboxAbort(store) {
   store.db.exec('drop trigger injected_work_outbox_abort;');
 }
 
-test('source admission is canonical, idempotent, and fenced to one writer', () => {
+test('source admission is canonical and idempotent across independent runtime connections', () => {
   const f = fixture();
+  const second = openPreparedWorkLifecycleStore(f.root);
   try {
     const first = f.store.admitSource(source());
     assert.equal(first.status, 'created');
-    const replay = f.store.admitSource(source());
+    const replay = second.admitSource(source());
     assert.equal(replay.status, 'created');
     assert.equal(replay.ticket_id, first.ticket_id);
-    assert.equal(f.store.listTickets().length, 1);
+    assert.equal(second.listTickets().length, 1);
     assert.equal(f.store.listTicketSources(first.ticket_id).length, 1);
-
-    assert.throws(
-      () => openPreparedWorkLifecycleStore(f.root, {
-        writerId: 'second-writer',
-        writerLeaseMs: 60_000,
-      }),
-      /work_lifecycle_writer_authority_held:test-writer/,
-    );
   } finally {
+    second.close();
     f.close();
-  }
-});
-
-test('writer authority heartbeat keeps a short lease alive during long-running work', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'narada-work-heartbeat-'));
-  const inspection = prepareWorkLifecycleStore(root);
-  assert.equal(inspection.status, 'prepared');
-  const store = openPreparedWorkLifecycleStore(root, {
-    writerId: 'heartbeat-writer',
-    writerLeaseMs: 60,
-  });
-  try {
-    const before = store.db.prepare(
-      'select heartbeat_at from work_runtime_authority where singleton = 1',
-    ).get().heartbeat_at;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const after = store.db.prepare(
-      'select heartbeat_at, lease_expires_at from work_runtime_authority where singleton = 1',
-    ).get();
-    assert.notEqual(after.heartbeat_at, before);
-    assert.ok(new Date(after.lease_expires_at).getTime() > Date.now());
-  } finally {
-    store.close();
-    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -245,7 +212,6 @@ test('hard cutover migrates task evidence and active tickets while omitting Site
 
     const migrated = openPreparedWorkLifecycleStore(root, {
       databasePath: targetPath,
-      writerId: 'migration-verifier',
     });
     try {
       assert.equal(migrated.taskStore.getLifecycle('legacy-task-1').task_number, 41);

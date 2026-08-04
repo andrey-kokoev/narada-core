@@ -41,7 +41,6 @@ const MAX_REF_JSON_BYTES = 16_384;
 const MAX_EVENT_JSON_BYTES = 16_384;
 const MAX_OPERATION_RESULT_BYTES = 32_768;
 const MAX_DRAFT_BODY_BYTES = 12 * 1024;
-const DEFAULT_WRITER_LEASE_MS = 30_000;
 const TERMINAL_TASK_STATUSES = new Set(['closed', 'confirmed']);
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
   'body',
@@ -478,14 +477,6 @@ function initializeWorkSchema(db: Db): void {
     create index if not exists idx_work_operations_aggregate
       on work_operations(aggregate_kind, aggregate_id, created_at);
 
-    create table if not exists work_runtime_authority (
-      singleton integer primary key check (singleton = 1),
-      writer_id text not null,
-      lease_expires_at text not null,
-      acquired_at text not null,
-      heartbeat_at text not null
-    );
-
     insert into work_sequences(sequence_name, next_value)
       values ('ticket', 1)
       on conflict(sequence_name) do nothing;
@@ -717,19 +708,7 @@ export function openPreparedWorkLifecycleStore(
   const taskStore = openPreparedTaskLifecycleStore(siteRoot, { databasePath });
   taskStore.db.pragma('foreign_keys = on');
   taskStore.db.pragma('recursive_triggers = off');
-  const store = new WorkLifecycleStore(taskStore, {
-    ...options,
-    databasePath,
-    writerId: options.writerId ?? `work-runtime-${randomUUID()}`,
-  });
-  try {
-    store.acquireWriterAuthority();
-    store.startWriterAuthorityHeartbeat();
-    return store;
-  } catch (error) {
-    taskStore.db.close();
-    throw error;
-  }
+  return new WorkLifecycleStore(taskStore, { ...options, databasePath });
 }
 
 export function migrateLegacyTaskLifecycleToWorkLifecycle(
@@ -916,8 +895,6 @@ export function migrateLegacyTaskLifecycleToWorkLifecycle(
 
   const workStore = openPreparedWorkLifecycleStore(siteRoot, {
     databasePath: targetDatabasePath,
-    writerId: 'work-lifecycle-hard-cutover',
-    writerLeaseMs: 300_000,
     now: options.now,
   });
   let taskEventsSeeded = 0;
@@ -926,7 +903,6 @@ export function migrateLegacyTaskLifecycleToWorkLifecycle(
   let foreignKeyViolations = -1;
   try {
     taskEventsSeeded = workStore.db.transaction(() => {
-      workStore.heartbeatWriterAuthority();
       const inserted = workStore.db.prepare(`
         insert or ignore into work_lifecycle_events(
           event_id, aggregate_kind, aggregate_id, aggregate_revision, event_type,
@@ -1026,20 +1002,15 @@ export function migrateLegacyTaskLifecycleToWorkLifecycle(
 export class WorkLifecycleStore {
   readonly taskStore: SqliteTaskLifecycleStore;
   readonly databasePath: string;
-  readonly writerId: string;
-  readonly writerLeaseMs: number;
   readonly #now: () => Date;
   #closed = false;
-  #writerHeartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(taskStore: SqliteTaskLifecycleStore, options: Required<Pick<
     WorkLifecycleOpenOptions,
-    'databasePath' | 'writerId'
+    'databasePath'
   >> & WorkLifecycleOpenOptions) {
     this.taskStore = taskStore;
     this.databasePath = options.databasePath;
-    this.writerId = options.writerId;
-    this.writerLeaseMs = options.writerLeaseMs ?? DEFAULT_WRITER_LEASE_MS;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -1047,84 +1018,9 @@ export class WorkLifecycleStore {
     return this.taskStore.db;
   }
 
-  acquireWriterAuthority(): void {
-    const now = this.#now().toISOString();
-    const expiresAt = new Date(this.#now().getTime() + this.writerLeaseMs).toISOString();
-    this.db.transaction(() => {
-      const row = this.db.prepare(
-        'select writer_id, lease_expires_at from work_runtime_authority where singleton = 1',
-      ).get() as SqlRow | undefined;
-      if (
-        row
-        && String(row.writer_id) !== this.writerId
-        && String(row.lease_expires_at) > now
-      ) {
-        throw new Error(`work_lifecycle_writer_authority_held:${String(row.writer_id)}`);
-      }
-      this.db.prepare(`
-        insert into work_runtime_authority(
-          singleton, writer_id, lease_expires_at, acquired_at, heartbeat_at
-        ) values (1, ?, ?, ?, ?)
-        on conflict(singleton) do update set
-          writer_id = excluded.writer_id,
-          lease_expires_at = excluded.lease_expires_at,
-          acquired_at = excluded.acquired_at,
-          heartbeat_at = excluded.heartbeat_at
-      `).run(this.writerId, expiresAt, now, now);
-    })();
-  }
-
-  heartbeatWriterAuthority(): void {
-    const nowDate = this.#now();
-    const result = this.db.prepare(`
-      update work_runtime_authority
-         set lease_expires_at = ?, heartbeat_at = ?
-       where singleton = 1 and writer_id = ?
-    `).run(
-      new Date(nowDate.getTime() + this.writerLeaseMs).toISOString(),
-      nowDate.toISOString(),
-      this.writerId,
-    );
-    if (result.changes !== 1) throw new Error('work_lifecycle_writer_authority_lost');
-  }
-
-  startWriterAuthorityHeartbeat(intervalMs?: number): void {
-    if (this.#closed || this.#writerHeartbeatTimer) return;
-    const defaultIntervalMs = Number.isFinite(this.writerLeaseMs) && this.writerLeaseMs > 0
-      ? Math.max(10, Math.floor(this.writerLeaseMs / 3))
-      : 1_000;
-    const normalizedIntervalMs = Number.isFinite(intervalMs) && (intervalMs ?? 0) > 0
-      ? Math.max(1, Math.floor(intervalMs as number))
-      : defaultIntervalMs;
-    this.#writerHeartbeatTimer = setInterval(() => {
-      if (this.#closed) return;
-      try {
-        this.heartbeatWriterAuthority();
-      } catch {
-        // State-changing operations remain fail-closed through #assertWriterAuthority.
-      }
-    }, normalizedIntervalMs);
-    this.#writerHeartbeatTimer.unref?.();
-  }
-
-  stopWriterAuthorityHeartbeat(): void {
-    if (!this.#writerHeartbeatTimer) return;
-    clearInterval(this.#writerHeartbeatTimer);
-    this.#writerHeartbeatTimer = null;
-  }
-
-  releaseWriterAuthority(): void {
-    if (this.#closed) return;
-    this.db.prepare(
-      'delete from work_runtime_authority where singleton = 1 and writer_id = ?',
-    ).run(this.writerId);
-  }
-
   close(options: { checkpointWal?: boolean } = {}): void {
     if (this.#closed) return;
     try {
-      this.stopWriterAuthorityHeartbeat();
-      this.releaseWriterAuthority();
       if (options.checkpointWal === true) {
         this.db.exec('pragma wal_checkpoint(TRUNCATE);');
       }
@@ -1177,7 +1073,7 @@ export class WorkLifecycleStore {
     };
     const requestDigest = digest(normalized);
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const existing = this.#existingOperation<TicketProcessingContextResult>(
         normalized.idempotency_key,
         requestDigest,
@@ -1307,7 +1203,7 @@ export class WorkLifecycleStore {
     const normalized = this.#normalizeSourceInput(input);
     const requestDigest = digest(normalized);
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const existingOperation = this.#existingOperation<AdmitTicketSourceResult>(
         normalized.idempotency_key,
         requestDigest,
@@ -1477,7 +1373,7 @@ export class WorkLifecycleStore {
     const normalized = this.#normalizeProposal(input);
     const requestDigest = digest(normalized);
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const existing = this.#existingOperation<AdmitTicketProposalResult>(
         normalized.idempotency_key,
         requestDigest,
@@ -1737,7 +1633,7 @@ export class WorkLifecycleStore {
     }
     const requestDigest = digest(normalized);
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const prior = this.#existingOperation<{
         status: 'recorded' | 'already_recorded' | 'superseded';
         ticket: TicketRow;
@@ -1869,7 +1765,7 @@ export class WorkLifecycleStore {
     };
     const requestDigest = digest(normalized);
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const prior = this.#existingOperation<{
         status: 'reconciled' | 'already_reconciled';
         ticket: TicketRow;
@@ -1986,7 +1882,7 @@ export class WorkLifecycleStore {
   }
 
   registerOutboxConsumer(topic: string, consumerId: string): void {
-    this.#assertWriterAuthority();
+    this.#assertOpen();
     this.db.prepare(`
       insert into work_outbox_consumer_requirements(topic, consumer_id, registered_at)
       values (?, ?, ?)
@@ -2005,7 +1901,7 @@ export class WorkLifecycleStore {
   ): void {
     const receiptJson = assertReferencePayload(receipt, 'outbox_receipt');
     this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const event = this.db.prepare('select event_id from work_outbox where event_id = ?')
         .get(assertNonEmpty(eventId, 'event_id'));
       if (!event) throw new Error('work_outbox_event_not_found');
@@ -2028,7 +1924,7 @@ export class WorkLifecycleStore {
     const cutoff = new Date(before);
     if (Number.isNaN(cutoff.getTime())) throw new Error('compact_before_invalid');
     return this.db.transaction(() => {
-      this.#assertWriterAuthority();
+      this.#assertOpen();
       const now = this.#now().toISOString();
       const result = this.db.prepare(`
         update work_outbox as outbox
@@ -2184,18 +2080,8 @@ export class WorkLifecycleStore {
     };
   }
 
-  #assertWriterAuthority(): void {
-    const now = this.#now().toISOString();
-    const row = this.db.prepare(
-      'select writer_id, lease_expires_at from work_runtime_authority where singleton = 1',
-    ).get() as SqlRow | undefined;
-    if (!row || String(row.writer_id) !== this.writerId) {
-      throw new Error('work_lifecycle_writer_authority_lost');
-    }
-    if (String(row.lease_expires_at) <= now) {
-      throw new Error('work_lifecycle_writer_lease_expired');
-    }
-    this.heartbeatWriterAuthority();
+  #assertOpen(): void {
+    if (this.#closed) throw new Error('work_lifecycle_store_closed');
   }
 
   #requireTicket(ticketId: string): TicketRow {
