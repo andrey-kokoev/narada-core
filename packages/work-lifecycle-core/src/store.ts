@@ -1230,14 +1230,27 @@ export class WorkLifecycleStore {
       ) as SqlRow | undefined;
       if (existingSource) {
         const ticket = this.#requireTicket(String(existingSource.ticket_id));
+        const sourceId = String(existingSource.source_id);
+        const admissionEvent = (this.db.prepare(`
+          select event_id, payload_json
+            from work_lifecycle_events
+           where aggregate_kind = 'ticket'
+             and aggregate_id = ?
+             and event_type in ('ticket.created', 'ticket.source.admitted')
+           order by aggregate_revision, created_at, event_id
+        `).all(ticket.ticket_id) as SqlRow[]).find((row) => (
+          parseJsonObject(row.payload_json).source_id === sourceId
+        ));
+        if (!admissionEvent) throw new Error('ticket_source_admission_event_missing');
         const result: AdmitTicketSourceResult = {
           schema: 'narada.work_lifecycle.ticket_source_admission.v1',
           status: 'already_associated',
           ticket_id: ticket.ticket_id,
           ticket_number: ticket.ticket_number,
           ticket_revision: ticket.revision,
-          source_id: String(existingSource.source_id),
+          source_id: sourceId,
           receipt_id: String(existingSource.receipt_id),
+          event_id: String(admissionEvent.event_id),
         };
         this.#recordOperation(
           normalized.idempotency_key,
@@ -1721,6 +1734,38 @@ export class WorkLifecycleStore {
         normalized.receipt_id,
         now,
       );
+      const supersededDrafts = this.db.prepare(`
+        select draft_id
+          from ticket_draft_refs
+         where ticket_id = ?
+           and draft_id <> ?
+           and disposition is null
+         order by created_at asc, draft_id asc
+      `).all(normalized.ticket_id, normalized.draft_id) as SqlRow[];
+      if (supersededDrafts.length > 0) {
+        const supersessionEvidence = canonicalJson({
+          schema: 'narada.work_lifecycle.draft_supersession.v1',
+          superseded_by_draft_id: normalized.draft_id,
+          superseded_by_effect_claim_id: normalized.effect_claim_id,
+        });
+        this.db.prepare(`
+          update ticket_draft_refs
+             set disposition = 'superseded',
+                 disposition_evidence_kind = 'system_superseded_by_newer_draft',
+                 disposition_evidence_id = ?,
+                 disposition_evidence_json = ?,
+                 disposed_at = ?
+           where ticket_id = ?
+             and draft_id <> ?
+             and disposition is null
+        `).run(
+          normalized.draft_id,
+          supersessionEvidence,
+          now,
+          normalized.ticket_id,
+          normalized.draft_id,
+        );
+      }
       this.#transitionTicket(normalized.ticket_id, 'waiting_on_draft', now, {
         resolutionCode: null,
         blockerCode: null,
@@ -1737,6 +1782,7 @@ export class WorkLifecycleStore {
           effect_claim_id: normalized.effect_claim_id,
           draft_id: normalized.draft_id,
           receipt_id: normalized.receipt_id,
+          superseded_draft_ids: supersededDrafts.map((row) => String(row.draft_id)),
         },
       );
       const result = { status: 'recorded' as const, ticket: after, event_id: eventId };
@@ -1793,6 +1839,40 @@ export class WorkLifecycleStore {
         || String(draftRef.mailbox_id ?? '') !== evidence.mailbox_id
       ) throw new Error('ticket_draft_disposition_evidence_linkage_mismatch');
       const now = this.#now().toISOString();
+      const supersededDrafts = normalized.disposition === 'sent'
+        ? this.db.prepare(`
+            select draft_id
+              from ticket_draft_refs
+             where ticket_id = ?
+               and draft_id <> ?
+               and disposition is null
+             order by created_at asc, draft_id asc
+          `).all(normalized.ticket_id, normalized.draft_id) as SqlRow[]
+        : [];
+      if (supersededDrafts.length > 0) {
+        const supersessionEvidence = canonicalJson({
+          schema: 'narada.work_lifecycle.draft_supersession.v1',
+          superseded_by_sent_draft_id: normalized.draft_id,
+          sent_disposition_evidence_id: normalized.evidence_id,
+        });
+        this.db.prepare(`
+          update ticket_draft_refs
+             set disposition = 'superseded',
+                 disposition_evidence_kind = 'system_superseded_by_sent_draft',
+                 disposition_evidence_id = ?,
+                 disposition_evidence_json = ?,
+                 disposed_at = ?
+           where ticket_id = ?
+             and draft_id <> ?
+             and disposition is null
+        `).run(
+          normalized.draft_id,
+          supersessionEvidence,
+          now,
+          normalized.ticket_id,
+          normalized.draft_id,
+        );
+      }
       this.db.prepare(`
         update ticket_draft_refs
            set disposition = ?,
@@ -1827,6 +1907,7 @@ export class WorkLifecycleStore {
           disposition: normalized.disposition,
           evidence_kind: normalized.evidence_kind,
           evidence_id: normalized.evidence_id,
+          superseded_draft_ids: supersededDrafts.map((row) => String(row.draft_id)),
         },
       );
       const result = { status: 'reconciled' as const, ticket: after, event_id: eventId };

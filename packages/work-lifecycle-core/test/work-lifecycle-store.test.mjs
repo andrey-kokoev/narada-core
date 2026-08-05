@@ -92,6 +92,23 @@ test('source admission is canonical and idempotent across independent runtime co
     const replay = second.admitSource(source());
     assert.equal(replay.status, 'created');
     assert.equal(replay.ticket_id, first.ticket_id);
+    assert.equal(replay.event_id, first.event_id);
+
+    const semanticReplay = second.admitSource(source({
+      idempotency_key: 'admit:message-1:repair',
+    }));
+    assert.equal(semanticReplay.status, 'already_associated');
+    assert.equal(semanticReplay.ticket_id, first.ticket_id);
+    assert.equal(semanticReplay.source_id, first.source_id);
+    assert.equal(semanticReplay.receipt_id, first.receipt_id);
+    assert.equal(semanticReplay.event_id, first.event_id);
+
+    const context = second.loadTicketProcessingContext({
+      ticket_id: semanticReplay.ticket_id,
+      triggering_event_id: semanticReplay.event_id,
+      idempotency_key: 'processing-context:message-1:repair',
+    });
+    assert.equal(context.triggering_event.event_id, first.event_id);
     assert.equal(second.listTickets().length, 1);
     assert.equal(f.store.listTicketSources(first.ticket_id).length, 1);
   } finally {
@@ -494,6 +511,77 @@ test('stale proposals fail closed and newer evidence supersedes draft claims', (
   }
 });
 
+test('a newer recorded draft supersedes older unresolved draft references', () => {
+  const f = fixture();
+  try {
+    const admitted = f.store.admitSource(source());
+    const firstClaim = f.store.admitProposal({
+      ticket_id: admitted.ticket_id,
+      expected_revision: admitted.ticket_revision,
+      route: 'response_draft',
+      idempotency_key: 'proposal:draft:supersession:1',
+      causation_id: admitted.event_id,
+      actor_id: 'agent-test',
+      summary: 'Prepare the first reply.',
+      draft: {
+        source_id: admitted.source_id,
+        reply_mode: 'reply',
+        body_text: 'First reply.',
+      },
+    });
+    const firstReceipt = f.store.recordDraftReceipt({
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: firstClaim.effect_claim_id,
+      draft_operation_key: firstClaim.draft_operation_key,
+      draft_request_digest: firstClaim.draft_request_digest,
+      receipt_id: 'graph-create-receipt:supersession:1',
+      draft_id: 'draft-supersession-1',
+      draft_ref: { message_id: 'draft-supersession-1' },
+      idempotency_key: 'record-draft-receipt:supersession:1',
+      causation_id: 'graph-create-receipt:supersession:1',
+    });
+    const secondClaim = f.store.admitProposal({
+      ticket_id: admitted.ticket_id,
+      expected_revision: firstReceipt.ticket.revision,
+      route: 'response_draft',
+      idempotency_key: 'proposal:draft:supersession:2',
+      causation_id: firstReceipt.event_id,
+      actor_id: 'agent-test',
+      summary: 'Prepare the replacement reply.',
+      draft: {
+        source_id: admitted.source_id,
+        reply_mode: 'reply',
+        body_text: 'Replacement reply.',
+      },
+    });
+    const secondReceipt = f.store.recordDraftReceipt({
+      ticket_id: admitted.ticket_id,
+      effect_claim_id: secondClaim.effect_claim_id,
+      draft_operation_key: secondClaim.draft_operation_key,
+      draft_request_digest: secondClaim.draft_request_digest,
+      receipt_id: 'graph-create-receipt:supersession:2',
+      draft_id: 'draft-supersession-2',
+      draft_ref: { message_id: 'draft-supersession-2' },
+      idempotency_key: 'record-draft-receipt:supersession:2',
+      causation_id: 'graph-create-receipt:supersession:2',
+    });
+    const draftRefs = f.store.db.prepare(`
+      select draft_id, disposition, disposition_evidence_kind, disposition_evidence_id
+        from ticket_draft_refs
+       where ticket_id = ?
+       order by created_at asc, draft_id asc
+    `).all(admitted.ticket_id);
+    const first = draftRefs.find((draft) => draft.draft_id === 'draft-supersession-1');
+    const second = draftRefs.find((draft) => draft.draft_id === 'draft-supersession-2');
+    assert.equal(first.disposition, 'superseded');
+    assert.equal(first.disposition_evidence_kind, 'system_superseded_by_newer_draft');
+    assert.equal(first.disposition_evidence_id, 'draft-supersession-2');
+    assert.equal(second.disposition, null);
+  } finally {
+    f.close();
+  }
+});
+
 test('Graph-backed draft disposition is linkage-checked, idempotent, and reactivates once', () => {
   const f = fixture();
   try {
@@ -529,6 +617,17 @@ test('Graph-backed draft disposition is linkage-checked, idempotent, and reactiv
       idempotency_key: 'record-draft-receipt:disposition',
       causation_id: 'graph-create-receipt-1',
     });
+    f.store.db.prepare(`
+      insert into ticket_draft_refs(
+        ticket_id, draft_id, effect_claim_id, draft_ref_json, receipt_id,
+        disposition, disposition_evidence_kind, disposition_evidence_id,
+        disposition_evidence_json, created_at, disposed_at
+      )
+      select ticket_id, 'draft-disposition-legacy', effect_claim_id, draft_ref_json,
+             'graph-create-receipt-legacy', null, null, null, null, created_at, null
+        from ticket_draft_refs
+       where ticket_id = ? and draft_id = ?
+    `).run(admitted.ticket_id, draftId);
     const observationId = 'graph_draft_disposition_controlled';
     const unsignedEvidence = {
       schema: 'narada.graph_mail.ticket_draft_disposition_receipt.v1',
@@ -564,6 +663,10 @@ test('Graph-backed draft disposition is linkage-checked, idempotent, and reactiv
     });
     assert.equal(shown.draft_refs[0].disposition, 'sent');
     assert.deepEqual(shown.draft_refs[0].disposition_evidence, evidence);
+    const legacyDraft = shown.draft_refs.find((draft) => draft.draft_id === 'draft-disposition-legacy');
+    assert.equal(legacyDraft.disposition, 'superseded');
+    assert.equal(legacyDraft.disposition_evidence_kind, 'system_superseded_by_sent_draft');
+    assert.equal(legacyDraft.disposition_evidence_id, draftId);
     assert.equal(f.store.listOutbox('scheduler-test', {
       topics: ['work.ticket-work-due.v1'],
     }).filter((event) => event.aggregate_id === admitted.ticket_id).length, 2);
