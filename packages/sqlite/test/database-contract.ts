@@ -6,6 +6,7 @@ import { join } from "node:path";
 interface ContractStatement {
   all(...args: unknown[]): unknown[];
   get(...args: unknown[]): unknown;
+  iterate(...args: unknown[]): IterableIterator<unknown>;
   run(...args: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   pluck(): ContractStatement;
 }
@@ -48,6 +49,15 @@ export function runDatabaseContract(DatabaseSync: DatabaseConstructor): void {
     assert.deepEqual(labels, ["alpha", "beta"]);
 
     assert.deepEqual(db.prepare("select label from items order by label").pluck().all(), ["alpha", "beta"]);
+    assert.deepEqual(
+      [...db.prepare("select label from items order by label").iterate()]
+        .map((row) => (row as Record<string, unknown>).label),
+      ["alpha", "beta"],
+    );
+    assert.deepEqual(
+      [...db.prepare("select label from items order by label").pluck().iterate()],
+      ["alpha", "beta"],
+    );
     db.exec("pragma user_version = 7");
     assert.equal(db.pragma("user_version"), 7);
 

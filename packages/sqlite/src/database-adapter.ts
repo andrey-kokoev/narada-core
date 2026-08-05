@@ -3,6 +3,7 @@ type BindArgs = unknown[];
 export interface NativeStatement {
   all(...args: BindArgs): unknown[];
   get(...args: BindArgs): unknown;
+  iterate(...args: BindArgs): IterableIterator<unknown>;
   run(...args: BindArgs): RunResult;
 }
 
@@ -26,6 +27,7 @@ export interface RunResult {
 export interface Statement {
   all<TRow = Record<string, unknown>>(...args: BindArgs): TRow[];
   get<TRow = Record<string, unknown>>(...args: BindArgs): TRow | undefined;
+  iterate<TRow = Record<string, unknown>>(...args: BindArgs): IterableIterator<TRow>;
   run(...args: BindArgs): RunResult;
   pluck(): Statement;
 }
@@ -122,6 +124,12 @@ class StatementAdapter implements Statement {
     const row = this.statement.get(...normalizeBindArgs(args));
     const normalized = row === null ? undefined : row;
     return (this.pluckFirstValue ? firstColumnValue(normalized) : normalized) as TRow | undefined;
+  }
+
+  *iterate<TRow = Record<string, unknown>>(...args: BindArgs): IterableIterator<TRow> {
+    for (const row of this.statement.iterate(...normalizeBindArgs(args))) {
+      yield (this.pluckFirstValue ? firstColumnValue(row) : row) as TRow;
+    }
   }
 
   run(...args: BindArgs): RunResult {
