@@ -1,0 +1,57 @@
+{
+  "name": "@narada-core/sqlite",
+  "version": "0.1.0",
+  "description": "Runtime-neutral SQLite adapter for Node.js and Bun with a better-sqlite3-compatible API",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./dist/index-bun.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0",
+    "bun": ">=1.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/narada-core/narada-core.git",
+    "directory": "packages/sqlite"
+  },
+  "keywords": [
+    "narada",
+    "sqlite",
+    "node:sqlite",
+    "bun:sqlite"
+  ],
+  "author": "Narada <team@narada.dev>",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm run test:node",
+    "test:node": "pnpm build && node --experimental-strip-types --test test/node.test.ts",
+    "test:bun": "pnpm build && bun test test/bun.test.ts",
+    "test:conformance": "pnpm run test:node && pnpm run test:bun"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.0"
+  },
+  "homepage": "https://github.com/narada-core/narada-core",
+  "bugs": {
+    "url": "https://github.com/narada-core/narada-core/issues"
+  }
+}
