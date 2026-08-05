@@ -2,8 +2,8 @@ import { builtinModules, createRequire } from 'node:module';
 
 export const SQLITE_BACKEND_ENV = 'NARADA_SQLITE_BACKEND';
 
-export type SqliteBackendPreference = 'auto' | 'better-sqlite3' | 'node:sqlite';
-export type SqliteBackendKind = 'better-sqlite3' | 'node:sqlite';
+export type SqliteBackendPreference = 'auto' | 'better-sqlite3' | 'bun:sqlite' | 'node:sqlite';
+export type SqliteBackendKind = 'better-sqlite3' | 'bun:sqlite' | 'node:sqlite';
 
 export interface SqliteRuntimePosture {
   preference: SqliteBackendPreference;
@@ -12,6 +12,8 @@ export interface SqliteRuntimePosture {
   node_version: string;
   node_major: number;
   node_sqlite_available: boolean;
+  bun_version: string | null;
+  bun_sqlite_available: boolean;
   better_sqlite3_available: boolean;
   reason: string;
   remediation?: string;
@@ -21,12 +23,15 @@ export interface SelectSqliteRuntimeOptions {
   preference?: string | null;
   nodeVersion?: string;
   nodeSqliteAvailable?: boolean;
+  bunVersion?: string | null;
+  bunSqliteAvailable?: boolean;
   betterSqlite3Available?: boolean;
 }
 
 const VALID_PREFERENCES = new Set<SqliteBackendPreference>([
   'auto',
   'better-sqlite3',
+  'bun:sqlite',
   'node:sqlite',
 ]);
 
@@ -36,8 +41,12 @@ export function parseSqliteBackendPreference(value: string | null | undefined): 
     return normalized as SqliteBackendPreference;
   }
   throw new Error(
-    `${SQLITE_BACKEND_ENV} must be one of: auto, better-sqlite3, node:sqlite; received ${JSON.stringify(value)}`,
+    `${SQLITE_BACKEND_ENV} must be one of: auto, better-sqlite3, bun:sqlite, node:sqlite; received ${JSON.stringify(value)}`,
   );
+}
+
+export function detectBunVersion(): string | null {
+  return (process.versions as Record<string, string | undefined>).bun ?? null;
 }
 
 export function detectNodeSqliteAvailability(): boolean {
@@ -70,11 +79,34 @@ export function detectBetterSqlite3Availability(rootPackageJsonPath = process.cw
 export function selectSqliteRuntime(options: SelectSqliteRuntimeOptions = {}): SqliteRuntimePosture {
   const nodeVersion = options.nodeVersion ?? process.versions.node;
   const nodeMajor = Number(nodeVersion.split('.')[0] ?? '0');
+  const bunVersion = options.bunVersion === undefined ? detectBunVersion() : options.bunVersion;
+  const bunSqliteAvailable = options.bunSqliteAvailable ?? bunVersion !== null;
   const preference = parseSqliteBackendPreference(
     options.preference ?? process.env[SQLITE_BACKEND_ENV] ?? 'auto',
   );
   const nodeSqliteAvailable = options.nodeSqliteAvailable ?? detectNodeSqliteAvailability();
   const betterSqlite3Available = options.betterSqlite3Available ?? true;
+
+  if (preference === 'bun:sqlite') {
+    const supported = bunVersion !== null && bunSqliteAvailable;
+    return {
+      preference,
+      selected: 'bun:sqlite',
+      supported,
+      node_version: nodeVersion,
+      node_major: nodeMajor,
+      node_sqlite_available: nodeSqliteAvailable,
+      bun_version: bunVersion,
+      bun_sqlite_available: bunSqliteAvailable,
+      better_sqlite3_available: betterSqlite3Available,
+      reason: supported
+        ? 'bun:sqlite is the authoritative Narada SQLite runtime under Bun'
+        : 'bun:sqlite is unavailable outside a Bun runtime',
+      remediation: supported
+        ? undefined
+        : 'Run under Bun with bun:sqlite, or unset NARADA_SQLITE_BACKEND to select the available runtime backend.',
+    };
+  }
 
   if (preference === 'node:sqlite') {
     const supported = nodeMajor >= 22 && nodeSqliteAvailable;
@@ -85,6 +117,8 @@ export function selectSqliteRuntime(options: SelectSqliteRuntimeOptions = {}): S
       node_version: nodeVersion,
       node_major: nodeMajor,
       node_sqlite_available: nodeSqliteAvailable,
+      bun_version: bunVersion,
+      bun_sqlite_available: bunSqliteAvailable,
       better_sqlite3_available: betterSqlite3Available,
       reason: supported
         ? 'node:sqlite is the authoritative Narada SQLite runtime'
@@ -103,6 +137,8 @@ export function selectSqliteRuntime(options: SelectSqliteRuntimeOptions = {}): S
       node_version: nodeVersion,
       node_major: nodeMajor,
       node_sqlite_available: nodeSqliteAvailable,
+      bun_version: bunVersion,
+      bun_sqlite_available: bunSqliteAvailable,
       better_sqlite3_available: betterSqlite3Available,
       reason: 'better-sqlite3 has been retired from the Narada task lifecycle runtime',
       remediation: 'Unset NARADA_SQLITE_BACKEND or set it to node:sqlite under Node 22+.',
@@ -111,18 +147,30 @@ export function selectSqliteRuntime(options: SelectSqliteRuntimeOptions = {}): S
 
   return {
     preference,
-    selected: nodeSqliteAvailable && nodeMajor >= 22 ? 'node:sqlite' : 'better-sqlite3',
-    supported: (nodeSqliteAvailable && nodeMajor >= 22) || betterSqlite3Available,
+    selected: bunVersion !== null && bunSqliteAvailable
+      ? 'bun:sqlite'
+      : nodeSqliteAvailable && nodeMajor >= 22
+        ? 'node:sqlite'
+        : 'better-sqlite3',
+    supported: (bunVersion !== null && bunSqliteAvailable)
+      || (nodeSqliteAvailable && nodeMajor >= 22)
+      || betterSqlite3Available,
     node_version: nodeVersion,
     node_major: nodeMajor,
     node_sqlite_available: nodeSqliteAvailable,
+    bun_version: bunVersion,
+    bun_sqlite_available: bunSqliteAvailable,
     better_sqlite3_available: betterSqlite3Available,
-    reason: nodeSqliteAvailable && nodeMajor >= 22
-      ? 'auto selects node:sqlite on Node 22+'
-      : 'auto keeps better-sqlite3 because node:sqlite is not available on this runtime',
-    remediation: (nodeSqliteAvailable && nodeMajor >= 22) || betterSqlite3Available
+    reason: bunVersion !== null && bunSqliteAvailable
+      ? 'auto selects bun:sqlite under Bun'
+      : nodeSqliteAvailable && nodeMajor >= 22
+        ? 'auto selects node:sqlite on Node 22+'
+        : 'auto keeps better-sqlite3 because node:sqlite is not available on this runtime',
+    remediation: (bunVersion !== null && bunSqliteAvailable)
+      || (nodeSqliteAvailable && nodeMajor >= 22)
+      || betterSqlite3Available
       ? undefined
-      : 'Use Node 22+ with node:sqlite, or install and rebuild better-sqlite3.',
+      : 'Use Bun with bun:sqlite, Node 22+ with node:sqlite, or install and rebuild better-sqlite3.',
   };
 }
 

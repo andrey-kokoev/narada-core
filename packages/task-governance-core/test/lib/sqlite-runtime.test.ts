@@ -5,6 +5,37 @@ import {
 } from '../../src/sqlite-runtime.js';
 
 describe('sqlite runtime posture', () => {
+  it('defaults to bun:sqlite in auto mode under Bun', () => {
+    const posture = selectSqliteRuntime({
+      preference: 'auto',
+      nodeVersion: '24.3.0',
+      nodeSqliteAvailable: true,
+      bunVersion: '1.3.14',
+      bunSqliteAvailable: true,
+      betterSqlite3Available: true,
+    });
+
+    expect(posture.selected).toBe('bun:sqlite');
+    expect(posture.supported).toBe(true);
+    expect(posture.bun_version).toBe('1.3.14');
+    expect(posture.reason).toContain('auto selects bun:sqlite');
+  });
+
+  it('rejects explicit bun:sqlite outside Bun', () => {
+    const posture = selectSqliteRuntime({
+      preference: 'bun:sqlite',
+      nodeVersion: '24.3.0',
+      nodeSqliteAvailable: true,
+      bunVersion: null,
+      bunSqliteAvailable: false,
+      betterSqlite3Available: true,
+    });
+
+    expect(posture.selected).toBe('bun:sqlite');
+    expect(posture.supported).toBe(false);
+    expect(posture.reason).toContain('outside a Bun runtime');
+  });
+
   it('defaults to node:sqlite in auto mode on Node 22+', () => {
     const posture = selectSqliteRuntime({
       preference: 'auto',
