@@ -42,7 +42,7 @@ export default class Database extends DatabaseAdapter {
 }
 
 class BunDatabaseHandle implements NativeDatabase {
-  private readonly statements = new Set<BunNativeStatement>();
+  private readonly statements = new Set<BunStatementHandle>();
 
   constructor(private readonly database: BunNativeDatabase) {}
 
@@ -51,7 +51,7 @@ class BunDatabaseHandle implements NativeDatabase {
   }
 
   prepare(sql: string): BunNativeStatement {
-    const statement = this.database.prepare(sql);
+    const statement = new BunStatementHandle(this.database.prepare(sql));
     this.statements.add(statement);
     return statement;
   }
@@ -61,4 +61,50 @@ class BunDatabaseHandle implements NativeDatabase {
     this.statements.clear();
     this.database.close(true);
   }
+}
+
+class BunStatementHandle implements BunNativeStatement {
+  constructor(private readonly statement: BunNativeStatement) {}
+
+  all(...args: unknown[]): unknown[] {
+    return this.statement.all(...normalizeBunBindArgs(args));
+  }
+
+  get(...args: unknown[]): unknown {
+    return this.statement.get(...normalizeBunBindArgs(args));
+  }
+
+  *iterate(...args: unknown[]): IterableIterator<unknown> {
+    yield* this.statement.iterate(...normalizeBunBindArgs(args));
+  }
+
+  run(...args: unknown[]) {
+    return this.statement.run(...normalizeBunBindArgs(args));
+  }
+
+  finalize(): void {
+    this.statement.finalize();
+  }
+}
+
+function normalizeBunBindArgs(args: unknown[]): unknown[] {
+  return args.map((arg) => isPlainRecord(arg) ? expandBareNamedParameters(arg) : arg);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function expandBareNamedParameters(bindings: Record<string, unknown>): Record<string, unknown> {
+  const expanded = { ...bindings };
+  for (const [key, value] of Object.entries(bindings)) {
+    if (/^[$:@]/.test(key)) continue;
+    for (const prefix of ["$", ":", "@"]) {
+      const prefixed = `${prefix}${key}`;
+      if (!(prefixed in expanded)) expanded[prefixed] = value;
+    }
+  }
+  return expanded;
 }

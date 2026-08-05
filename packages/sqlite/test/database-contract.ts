@@ -79,6 +79,27 @@ export function runDatabaseContract(DatabaseSync: DatabaseConstructor): void {
     db.close();
     db.close();
 
+    const bareNamedDb = new DatabaseSync(":memory:");
+    try {
+      bareNamedDb.exec("create table roster_events (event_id text not null, event_type text not null, reason text)");
+      bareNamedDb.prepare(`
+        insert into roster_events(event_id, event_type, reason)
+        values (@event_id, @event_type, @reason)
+      `).run({
+        event_id: "roster-1",
+        event_type: "admit_agent",
+        reason: null,
+      });
+      const rosterEvent = bareNamedDb
+        .prepare("select event_id, event_type, reason from roster_events")
+        .get() as Record<string, unknown>;
+      assert.equal(rosterEvent.event_id, "roster-1");
+      assert.equal(rosterEvent.event_type, "admit_agent");
+      assert.equal(rosterEvent.reason, null);
+    } finally {
+      bareNamedDb.close();
+    }
+
     const readOnly = new DatabaseSync(path, { readOnly: true });
     assert.equal(readOnly.prepare("select count(*) as count from items").pluck().get(), 4);
     assert.throws(() => readOnly.prepare("insert into items(label, quantity) values ('forbidden', 1)").run());
