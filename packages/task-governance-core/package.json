@@ -46,6 +46,9 @@
     "test:assignment-lifecycle": "vitest run test/lib/task-assignment-lifecycle-service.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000",
     "test:governance": "vitest run test/lib/task-governance.test.ts --pool=forks --no-file-parallelism --maxWorkers=1 --testTimeout=120000 --hookTimeout=120000"
   },
+  "dependencies": {
+    "@narada-core/sqlite": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "typescript": "^5.8.3",

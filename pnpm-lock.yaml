@@ -50,6 +50,10 @@ importers:
         version: 5.9.3
 
   packages/task-governance-core:
+    dependencies:
+      '@narada-core/sqlite':
+        specifier: workspace:*
+        version: link:../sqlite
     devDependencies:
       '@types/node':
         specifier: ^22.15.0
